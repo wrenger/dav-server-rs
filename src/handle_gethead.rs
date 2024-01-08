@@ -72,7 +72,7 @@ impl crate::DavInner {
 
         let len = meta.len();
         let mut curpos = 0u64;
-        let file_etag = davheaders::ETag::from_meta(&meta);
+        let file_etag = davheaders::ETag::from_meta(&*meta);
 
         let mut ranges = Vec::new();
         let mut do_range = match req.headers().typed_try_get::<davheaders::IfRange>() {
@@ -93,20 +93,12 @@ impl crate::DavInner {
             res.headers_mut().typed_insert(etag);
         }
 
-        match self.redirect {
-            Some(redirect) => {
-                if redirect {
-                    match file.redirect_url().await? {
-                        Some(url) => {
-                            res.headers_mut().insert("Location", url.parse().unwrap());
-                            *res.status_mut() = StatusCode::FOUND;
-                            return Ok(res);
-                        }
-                        None => {}
-                    }
-                }
+        if self.redirect == Some(true) {
+            if let Some(url) = file.redirect_url().await? {
+                res.headers_mut().insert("Location", url.parse().unwrap());
+                *res.status_mut() = StatusCode::FOUND;
+                return Ok(res);
             }
-            None => {}
         }
 
         // Apache always adds an Accept-Ranges header, even with partial
@@ -116,7 +108,9 @@ impl crate::DavInner {
             .typed_insert(headers::AcceptRanges::bytes());
 
         // handle the if-headers.
-        if let Some(s) = conditional::if_match(req, Some(&meta), &self.fs, &self.ls, &path).await {
+        if let Some(s) =
+            conditional::if_match(req, Some(&*meta), &*self.fs, self.ls.as_deref(), &path).await
+        {
             *res.status_mut() = s;
             no_body = true;
             do_range = false;

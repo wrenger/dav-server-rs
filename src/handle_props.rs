@@ -199,7 +199,7 @@ impl DavInner {
 
         trace!("propfind: type request: {}", name);
 
-        let mut pw = PropWriter::new(req, &mut res, name, props, &self.fs, self.ls.as_ref())?;
+        let mut pw = PropWriter::new(req, &mut res, name, props, &*self.fs, self.ls.as_deref())?;
 
         *res.body_mut() = Body::from(AsyncStream::new(|tx| async move {
             pw.set_tx(tx);
@@ -376,7 +376,15 @@ impl DavInner {
         let meta = self.fixpath(&mut res, &mut path, meta);
 
         // check the If and If-* headers.
-        let tokens = match if_match_get_tokens(req, Some(&meta), &self.fs, &self.ls, &path).await {
+        let tokens = match if_match_get_tokens(
+            req,
+            Some(&*meta),
+            &*self.fs,
+            self.ls.as_deref(),
+            &path,
+        )
+        .await
+        {
             Ok(t) => t,
             Err(s) => return Err(s.into()),
         };
@@ -427,7 +435,7 @@ impl DavInner {
         }
 
         // if any set/remove failed, stop processing here.
-        if ret.iter().any(|&(ref s, _)| s != &StatusCode::OK) {
+        if ret.iter().any(|(s, _)| *s != StatusCode::OK) {
             ret = ret
                 .into_iter()
                 .map(|(s, p)| {
@@ -461,7 +469,7 @@ impl DavInner {
         }
 
         // And reply.
-        let mut pw = PropWriter::new(req, &mut res, "propertyupdate", Vec::new(), &self.fs, None)?;
+        let mut pw = PropWriter::new(req, &mut res, "propertyupdate", Vec::new(), &*self.fs, None)?;
         *res.body_mut() = Body::from(AsyncStream::new(|tx| async move {
             pw.set_tx(tx);
             pw.write_propresponse(&path, hm)?;
@@ -479,8 +487,8 @@ impl PropWriter {
         res: &mut Response<Body>,
         name: &str,
         mut props: Vec<Element>,
-        fs: &Box<dyn DavFileSystem>,
-        ls: Option<&Box<dyn DavLockSystem>>,
+        fs: &dyn DavFileSystem,
+        ls: Option<&dyn DavLockSystem>,
     ) -> DavResult<PropWriter> {
         let contenttype = "application/xml; charset=utf-8".parse().unwrap();
         res.headers_mut().insert("content-type", contenttype);
@@ -556,8 +564,8 @@ impl PropWriter {
             tx: None,
             name: name.to_string(),
             props,
-            fs: fs.clone(),
-            ls: ls.cloned(),
+            fs: fs.box_clone(),
+            ls: ls.map(|ls| ls.box_clone()),
             useragent: ua.to_string(),
             q_cache: Default::default(),
         })
@@ -708,23 +716,21 @@ impl PropWriter {
                     "supportedlock" => {
                         return Ok(StatusElement {
                             status: StatusCode::OK,
-                            element: list_supportedlock(self.ls.as_ref()),
+                            element: list_supportedlock(self.ls.as_deref()),
                         });
                     }
                     "lockdiscovery" => {
                         return Ok(StatusElement {
                             status: StatusCode::OK,
-                            element: list_lockdiscovery(self.ls.as_ref(), path),
+                            element: list_lockdiscovery(self.ls.as_deref(), path),
                         });
                     }
                     "quota-available-bytes" => {
-                        let qc = qc;
                         if let Ok((_, Some(avail))) = self.get_quota(qc, path, meta).await {
                             return self.build_elem(docontent, pfx, prop, avail.to_string());
                         }
                     }
                     "quota-used-bytes" => {
-                        let qc = qc;
                         if let Ok((used, _)) = self.get_quota(qc, path, meta).await {
                             let used = if self.useragent.contains("WebDAVFS") {
                                 // Need this on MacOs, otherwise the value is off
@@ -862,7 +868,7 @@ impl PropWriter {
             }
         }
 
-        Ok::<(), DavError>(self.write_propresponse(path, props)?)
+        self.write_propresponse(path, props)
     }
 
     pub fn write_propresponse(
@@ -910,7 +916,7 @@ impl PropWriter {
 }
 
 fn add_sc_elem(hm: &mut HashMap<StatusCode, Vec<Element>>, sc: StatusCode, e: Element) {
-    hm.entry(sc).or_insert_with(Vec::new);
+    hm.entry(sc).or_default();
     hm.get_mut(&sc).unwrap().push(e)
 }
 

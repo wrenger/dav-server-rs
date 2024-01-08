@@ -169,7 +169,13 @@ impl crate::DavInner {
         }
 
         // check the If and If-* headers.
-        let tokens = if_match_get_tokens(req, meta.as_ref().ok(), &self.fs, &self.ls, &path);
+        let tokens = if_match_get_tokens(
+            req,
+            meta.as_deref().ok(),
+            &*self.fs,
+            self.ls.as_deref(),
+            &path,
+        );
         let tokens = match tokens.await {
             Ok(t) => t,
             Err(s) => return Err(DavError::StatusClose(s)),
@@ -275,7 +281,7 @@ impl crate::DavInner {
         res.headers_mut().remove(http::header::CONNECTION);
 
         if let Ok(m) = file.metadata().await {
-            if let Some(etag) = davheaders::ETag::from_meta(&m) {
+            if let Some(etag) = davheaders::ETag::from_meta(&*m) {
                 res.headers_mut().typed_insert(etag);
             }
             if let Ok(modified) = m.modified() {

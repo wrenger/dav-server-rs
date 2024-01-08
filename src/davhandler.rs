@@ -178,7 +178,7 @@ pub(crate) struct DavInner {
 impl From<DavConfig> for DavInner {
     fn from(cfg: DavConfig) -> Self {
         DavInner {
-            prefix: cfg.prefix.unwrap_or_else(|| "".to_string()),
+            prefix: cfg.prefix.unwrap_or_default(),
             fs: cfg.fs.unwrap_or_else(|| VoidFs::new()),
             ls: cfg.ls,
             allow: cfg.allow,
@@ -199,7 +199,7 @@ impl From<&DavConfig> for DavInner {
                 .prefix
                 .as_ref()
                 .map(|p| p.to_owned())
-                .unwrap_or_else(|| "".to_string()),
+                .unwrap_or_default(),
             fs: cfg.fs.clone().unwrap(),
             ls: cfg.ls.clone(),
             allow: cfg.allow,
@@ -534,7 +534,7 @@ impl DavInner {
 
         debug!("== START REQUEST {:?} {}", method, path);
 
-        let res = match method {
+        match method {
             DavMethod::Options => self.handle_options(&req).await,
             DavMethod::PropFind => self.handle_propfind(&req, &body_data).await,
             DavMethod::PropPatch => self.handle_proppatch(&req, &body_data).await,
@@ -545,7 +545,6 @@ impl DavInner {
             DavMethod::Head | DavMethod::Get => self.handle_get(&req).await,
             DavMethod::Copy | DavMethod::Move => self.handle_copymove(&req, method).await,
             DavMethod::Put | DavMethod::Patch => self.handle_put(&req, body_strm.unwrap()).await,
-        };
-        res
+        }
     }
 }

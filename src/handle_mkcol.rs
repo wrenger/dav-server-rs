@@ -13,7 +13,7 @@ impl crate::DavInner {
         let meta = self.fs.metadata(&path).await;
 
         // check the If and If-* headers.
-        let res = if_match_get_tokens(req, meta.as_ref().ok(), &self.fs, &self.ls, &path).await;
+        let res = if_match_get_tokens(req, meta.ok().as_deref(), &*self.fs, self.ls.as_deref(), &path).await;
         let tokens = match res {
             Ok(t) => t,
             Err(s) => return Err(DavError::Status(s)),

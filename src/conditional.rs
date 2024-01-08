@@ -1,9 +1,9 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use headers::HeaderMapExt;
+use headers::{HeaderMapExt, IfModifiedSince};
 use http::{Method, StatusCode};
 
-use crate::davheaders::{self, ETag};
+use crate::davheaders::{self, ETag, ETagList, If, IfItem, IfNoneMatch, IfRange};
 use crate::davpath::DavPath;
 use crate::fs::{DavFileSystem, DavMetaData};
 use crate::ls::DavLockSystem;
@@ -20,31 +20,18 @@ fn round_time(tm: impl Into<SystemTime>) -> SystemTime {
     }
 }
 
-pub(crate) fn ifrange_match(
-    hdr: &davheaders::IfRange,
-    tag: Option<&davheaders::ETag>,
-    date: Option<SystemTime>,
-) -> bool {
-    match *hdr {
-        davheaders::IfRange::Date(ref d) => match date {
-            Some(date) => round_time(date) == round_time(*d),
-            None => false,
-        },
-        davheaders::IfRange::ETag(ref t) => match tag {
-            Some(tag) => t == tag,
-            None => false,
-        },
+pub(crate) fn ifrange_match(hdr: &IfRange, tag: Option<&ETag>, date: Option<SystemTime>) -> bool {
+    match (hdr, tag, date) {
+        (IfRange::Date(d), None, Some(date)) => round_time(date) == round_time(*d),
+        (IfRange::ETag(t), Some(tag), None) => t == tag,
+        _ => false,
     }
 }
 
-pub(crate) fn etaglist_match(
-    tags: &davheaders::ETagList,
-    exists: bool,
-    tag: Option<&davheaders::ETag>,
-) -> bool {
-    match *tags {
-        davheaders::ETagList::Star => exists,
-        davheaders::ETagList::Tags(ref t) => match tag {
+pub(crate) fn etaglist_match(tags: &ETagList, exists: bool, tag: Option<&ETag>) -> bool {
+    match tags {
+        ETagList::Star => exists,
+        ETagList::Tags(ref t) => match tag {
             Some(tag) => t.iter().any(|x| x == tag),
             None => false,
         },
@@ -52,10 +39,7 @@ pub(crate) fn etaglist_match(
 }
 
 // Handle the if-headers: RFC 7232, HTTP/1.1 Conditional Requests.
-pub(crate) fn http_if_match(
-    req: &Request,
-    meta: Option<&Box<dyn DavMetaData>>,
-) -> Option<StatusCode> {
+pub(crate) fn http_if_match(req: &Request, meta: Option<&dyn DavMetaData>) -> Option<StatusCode> {
     let file_modified = meta.and_then(|m| m.modified().ok());
 
     if let Some(r) = req.headers().typed_get::<davheaders::IfMatch>() {
@@ -76,7 +60,7 @@ pub(crate) fn http_if_match(
         }
     }
 
-    if let Some(r) = req.headers().typed_get::<davheaders::IfNoneMatch>() {
+    if let Some(r) = req.headers().typed_get::<IfNoneMatch>() {
         let etag = meta.and_then(ETag::from_meta);
         if etaglist_match(&r.0, meta.is_some(), etag.as_ref()) {
             trace!("precondition fail: If-None-Match {:?}", r);
@@ -86,7 +70,7 @@ pub(crate) fn http_if_match(
                 return Some(StatusCode::PRECONDITION_FAILED);
             }
         }
-    } else if let Some(r) = req.headers().typed_get::<headers::IfModifiedSince>() {
+    } else if let Some(r) = req.headers().typed_get::<IfModifiedSince>() {
         if req.method() == Method::GET || req.method() == Method::HEAD {
             if let Some(file_modified) = file_modified {
                 if round_time(file_modified) <= round_time(r) {
@@ -107,16 +91,16 @@ pub(crate) fn http_if_match(
 // caller should set the http status to 412 PreconditionFailed if
 // the return value from this function is false.
 //
-pub(crate) async fn dav_if_match<'a>(
-    req: &'a Request,
-    fs: &'a Box<dyn DavFileSystem + 'static>,
-    ls: &'a Option<Box<dyn DavLockSystem + 'static>>,
-    path: &'a DavPath,
+pub(crate) async fn dav_if_match(
+    req: &Request,
+    fs: &dyn DavFileSystem,
+    ls: Option<&dyn DavLockSystem>,
+    path: &DavPath,
 ) -> (bool, Vec<String>) {
     let mut tokens: Vec<String> = Vec::new();
     let mut any_list_ok = false;
 
-    let r = match req.headers().typed_get::<davheaders::If>() {
+    let r = match req.headers().typed_get::<If>() {
         Some(r) => r,
         None => return (true, tokens),
     };
@@ -124,7 +108,7 @@ pub(crate) async fn dav_if_match<'a>(
     for iflist in r.0.iter() {
         // save and return all statetokens that we encountered.
         let toks = iflist.conditions.iter().filter_map(|c| match c.item {
-            davheaders::IfItem::StateToken(ref t) => Some(t.to_owned()),
+            IfItem::StateToken(ref t) => Some(t.to_owned()),
             _ => None,
         });
         tokens.extend(toks);
@@ -154,18 +138,18 @@ pub(crate) async fn dav_if_match<'a>(
         let mut list_ok = false;
         for cond in iflist.conditions.iter() {
             let cond_ok = match cond.item {
-                davheaders::IfItem::StateToken(ref s) => {
+                IfItem::StateToken(ref s) => {
                     // tokens in DAV: namespace always evaluate to false (10.4.8)
                     if !valid || s.starts_with("DAV:") {
                         false
                     } else {
-                        match *ls {
-                            Some(ref ls) => ls.check(p, None, true, false, vec![s]).is_ok(),
+                        match ls {
+                            Some(ls) => ls.check(p, None, true, false, vec![s]).is_ok(),
                             None => false,
                         }
                     }
                 }
-                davheaders::IfItem::ETag(ref tag) => {
+                IfItem::ETag(ref tag) => {
                     if !valid {
                         // invalid location, so always false.
                         false
@@ -173,7 +157,7 @@ pub(crate) async fn dav_if_match<'a>(
                         match fs.metadata(p).await {
                             Ok(meta) => {
                                 // exists and may have metadata ..
-                                if let Some(mtag) = ETag::from_meta(meta) {
+                                if let Some(mtag) = ETag::from_meta(&*meta) {
                                     tag == &mtag
                                 } else {
                                     false
@@ -204,12 +188,12 @@ pub(crate) async fn dav_if_match<'a>(
 }
 
 // Handle both the HTTP conditional If: headers, and the webdav If: header.
-pub(crate) async fn if_match<'a>(
-    req: &'a Request,
-    meta: Option<&'a Box<dyn DavMetaData + 'static>>,
-    fs: &'a Box<dyn DavFileSystem + 'static>,
-    ls: &'a Option<Box<dyn DavLockSystem + 'static>>,
-    path: &'a DavPath,
+pub(crate) async fn if_match(
+    req: &Request,
+    meta: Option<&dyn DavMetaData>,
+    fs: &dyn DavFileSystem,
+    ls: Option<&dyn DavLockSystem>,
+    path: &DavPath,
 ) -> Option<StatusCode> {
     match dav_if_match(req, fs, ls, path).await {
         (true, _) => {}
@@ -219,12 +203,12 @@ pub(crate) async fn if_match<'a>(
 }
 
 // Like if_match, but also returns all "associated state-tokens"
-pub(crate) async fn if_match_get_tokens<'a>(
-    req: &'a Request,
-    meta: Option<&'a Box<dyn DavMetaData + 'static>>,
-    fs: &'a Box<dyn DavFileSystem + 'static>,
-    ls: &'a Option<Box<dyn DavLockSystem + 'static>>,
-    path: &'a DavPath,
+pub(crate) async fn if_match_get_tokens(
+    req: &Request,
+    meta: Option<&dyn DavMetaData>,
+    fs: &dyn DavFileSystem,
+    ls: Option<&dyn DavLockSystem>,
+    path: &DavPath,
 ) -> Result<Vec<String>, StatusCode> {
     if let Some(code) = http_if_match(req, meta) {
         return Err(code);

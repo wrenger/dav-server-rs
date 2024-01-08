@@ -286,7 +286,7 @@ impl DavFileSystem for LocalFs {
             trace!("FS: read_dir {:?}", self.fspath_dbg(davpath));
             let path = self.fspath(davpath);
             let path2 = path.clone();
-            let iter = self.blocking(move || std::fs::read_dir(&path)).await;
+            let iter = self.blocking(move || std::fs::read_dir(path)).await;
             match iter {
                 Ok(iterator) => {
                     let strm = LocalFsReadDir {
@@ -531,7 +531,7 @@ impl LocalFsReadDir {
 }
 
 // The stream implementation tries to be smart and batch I/O operations
-impl<'a> Stream for LocalFsReadDir {
+impl Stream for LocalFsReadDir {
     type Item = Box<dyn DavDirEntry>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -592,17 +592,17 @@ enum Is {
 
 impl LocalFsDirEntry {
     async fn is_a(&self, is: Is) -> FsResult<bool> {
-        match self.meta {
-            Meta::Data(Ok(ref meta)) => Ok(match is {
+        match &self.meta {
+            Meta::Data(Ok(meta)) => Ok(match is {
                 Is::File => meta.file_type().is_file(),
                 Is::Dir => meta.file_type().is_dir(),
                 Is::Symlink => meta.file_type().is_symlink(),
             }),
-            Meta::Data(Err(ref e)) => Err(e.into()),
-            Meta::Fs(ref fs) => {
+            Meta::Data(Err(e)) => Err(e.into()),
+            Meta::Fs(fs) => {
                 let fullpath = self.entry.path();
                 let ft = fs
-                    .blocking(move || std::fs::metadata(&fullpath))
+                    .blocking(move || std::fs::metadata(fullpath))
                     .await?
                     .file_type();
                 Ok(match is {
@@ -617,17 +617,17 @@ impl LocalFsDirEntry {
 
 impl DavDirEntry for LocalFsDirEntry {
     fn metadata(&self) -> FsFuture<Box<dyn DavMetaData>> {
-        match self.meta {
-            Meta::Data(ref meta) => {
+        match &self.meta {
+            Meta::Data(meta) => {
                 let m = match meta {
                     Ok(meta) => Ok(Box::new(LocalFsMetaData(meta.clone())) as Box<dyn DavMetaData>),
                     Err(e) => Err(e.into()),
                 };
                 Box::pin(future::ready(m))
             }
-            Meta::Fs(ref fs) => {
+            Meta::Fs(fs) => {
                 let fullpath = self.entry.path();
-                fs.blocking(move || match std::fs::metadata(&fullpath) {
+                fs.blocking(move || match std::fs::metadata(fullpath) {
                     Ok(meta) => Ok(Box::new(LocalFsMetaData(meta)) as Box<dyn DavMetaData>),
                     Err(e) => Err(e.into()),
                 })

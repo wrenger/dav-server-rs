@@ -212,7 +212,15 @@ impl crate::DavInner {
         }
 
         // check If and If-* headers for source URL
-        let tokens = match if_match_get_tokens(req, Some(&meta), &self.fs, &self.ls, &path).await {
+        let tokens = match if_match_get_tokens(
+            req,
+            Some(&*meta),
+            &*self.fs,
+            self.ls.as_deref(),
+            &path,
+        )
+        .await
+        {
             Ok(t) => t,
             Err(s) => return Err(s.into()),
         };

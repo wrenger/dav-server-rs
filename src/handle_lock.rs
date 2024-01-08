@@ -42,7 +42,7 @@ impl crate::DavInner {
         // lock refresh?
         if xmldata.is_empty() {
             // get locktoken
-            let (_, tokens) = dav_if_match(req, &self.fs, &self.ls, &path).await;
+            let (_, tokens) = dav_if_match(req, &*self.fs, self.ls.as_deref(), &path).await;
             if tokens.len() != 1 {
                 return Err(SC::BAD_REQUEST.into());
             }
@@ -75,7 +75,8 @@ impl crate::DavInner {
         };
 
         // handle the if-headers.
-        if let Some(s) = if_match(req, meta.as_ref(), &self.fs, &self.ls, &path).await {
+        if let Some(s) = if_match(req, meta.as_deref(), &*self.fs, self.ls.as_deref(), &path).await
+        {
             return Err(s.into());
         }
 
@@ -111,7 +112,7 @@ impl crate::DavInner {
         for elem in tree.child_elems_iter() {
             match elem.name.as_str() {
                 "lockscope" => {
-                    let name = elem.child_elems_iter().find_map(|e| Some(e.name.as_ref()));
+                    let name = elem.child_elems_iter().map(|e| e.name.as_ref()).next();
                     match name {
                         Some("exclusive") => shared = Some(false),
                         Some("shared") => shared = Some(true),
@@ -119,7 +120,7 @@ impl crate::DavInner {
                     }
                 }
                 "locktype" => {
-                    let name = elem.child_elems_iter().find_map(|e| Some(e.name.as_ref()));
+                    let name = elem.child_elems_iter().map(|e| e.name.as_ref()).next();
                     match name {
                         Some("write") => locktype = true,
                         _ => return Err(DavError::XmlParseError),
@@ -221,7 +222,7 @@ impl crate::DavInner {
     }
 }
 
-pub(crate) fn list_lockdiscovery(ls: Option<&Box<dyn DavLockSystem>>, path: &DavPath) -> Element {
+pub(crate) fn list_lockdiscovery(ls: Option<&dyn DavLockSystem>, path: &DavPath) -> Element {
     let mut elem = Element::new2("D:lockdiscovery");
 
     // must have a locksystem or bail
@@ -238,7 +239,7 @@ pub(crate) fn list_lockdiscovery(ls: Option<&Box<dyn DavLockSystem>>, path: &Dav
     elem
 }
 
-pub(crate) fn list_supportedlock(ls: Option<&Box<dyn DavLockSystem>>) -> Element {
+pub(crate) fn list_supportedlock(ls: Option<&dyn DavLockSystem>) -> Element {
     let mut elem = Element::new2("D:supportedlock");
 
     // must have a locksystem or bail

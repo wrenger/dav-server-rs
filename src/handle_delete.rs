@@ -124,7 +124,8 @@ impl crate::DavInner {
         path.add_slash_if(meta.is_dir());
 
         // check the If and If-* headers.
-        let tokens_res = if_match_get_tokens(req, Some(&meta), &self.fs, &self.ls, &path).await;
+        let tokens_res =
+            if_match_get_tokens(req, Some(&*meta), &*self.fs, self.ls.as_deref(), &path).await;
         let tokens = match tokens_res {
             Ok(t) => t,
             Err(s) => return Err(DavError::Status(s)),
