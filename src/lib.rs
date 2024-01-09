@@ -115,20 +115,6 @@ mod conditional;
 mod davhandler;
 mod davheaders;
 mod errors;
-mod handle_copymove;
-mod handle_delete;
-mod handle_gethead;
-mod handle_lock;
-mod handle_mkcol;
-mod handle_options;
-mod handle_props;
-mod handle_put;
-#[cfg(any(docsrs, feature = "localfs"))]
-#[cfg_attr(docsrs, doc(cfg(feature = "localfs")))]
-mod localfs_macos;
-#[cfg(any(docsrs, feature = "localfs"))]
-#[cfg_attr(docsrs, doc(cfg(feature = "localfs")))]
-mod localfs_windows;
 mod multierror;
 mod tree;
 mod util;
@@ -136,16 +122,8 @@ mod xmltree_ext;
 
 pub mod body;
 pub mod davpath;
-mod fakels;
 mod fs;
-#[cfg(any(docsrs, feature = "localfs"))]
-#[cfg_attr(docsrs, doc(cfg(feature = "localfs")))]
-mod localfs;
 mod ls;
-#[cfg(any(docsrs, feature = "memfs"))]
-#[cfg_attr(docsrs, doc(cfg(feature = "memfs")))]
-mod memfs;
-mod memls;
 
 #[cfg(any(docsrs, feature = "actix-compat"))]
 #[cfg_attr(docsrs, doc(cfg(feature = "actix-compat")))]

@@ -27,11 +27,9 @@ use futures_util::{future, future::BoxFuture, FutureExt, Stream};
 use pin_utils::pin_mut;
 use tokio::task;
 
-use libc;
-
 use crate::davpath::DavPath;
 use crate::fs::*;
-use crate::localfs_macos::DUCacheBuilder;
+use super::localfs_macos::DUCacheBuilder;
 
 const RUNTIME_TYPE_BASIC: u32 = 1;
 const RUNTIME_TYPE_THREADPOOL: u32 = 2;
@@ -186,7 +184,7 @@ impl LocalFs {
 
     fn fspath(&self, path: &DavPath) -> PathBuf {
         if self.inner.case_insensitive {
-            crate::localfs_windows::resolve(&self.inner.basedir, path)
+            super::localfs_windows::resolve(&self.inner.basedir, path)
         } else {
             let mut pathbuf = self.inner.basedir.clone();
             if !self.inner.is_file {

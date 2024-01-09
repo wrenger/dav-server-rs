@@ -14,6 +14,7 @@ use xml::writer::XmlEvent as XmlWEvent;
 use xml::EmitterConfig;
 use xmltree::{Element, XMLNode};
 
+use super::handle_lock::{list_lockdiscovery, list_supportedlock};
 use crate::async_stream::AsyncStream;
 use crate::body::Body;
 use crate::conditional::if_match_get_tokens;
@@ -21,7 +22,6 @@ use crate::davheaders;
 use crate::davpath::*;
 use crate::errors::*;
 use crate::fs::*;
-use crate::handle_lock::{list_lockdiscovery, list_supportedlock};
 use crate::ls::*;
 use crate::util::MemBuffer;
 use crate::util::{dav_xml_error, systemtime_to_httpdate, systemtime_to_rfc3339};
@@ -231,7 +231,7 @@ impl DavHandler {
             } else {
                 ReadDirMeta::Data
             };
-            let mut entries = match self.fs.read_dir(&path, readdir_meta).await {
+            let mut entries = match self.fs.read_dir(path, readdir_meta).await {
                 Ok(entries) => entries,
                 Err(e) => {
                     // if we cannot read_dir, just skip it.

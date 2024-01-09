@@ -16,17 +16,26 @@ use http_body::Body as HttpBody;
 use crate::body::{Body, StreamBody};
 use crate::davheaders;
 use crate::davpath::DavPath;
-use crate::fakels::FakeLs;
-use crate::handle_gethead::READ_BUF_SIZE;
-use crate::localfs::LocalFs;
-use crate::memfs::MemFs;
-use crate::memls::MemLs;
+use crate::fs::localfs::LocalFs;
+use crate::fs::memfs::MemFs;
+use crate::ls::fakels::FakeLs;
+use crate::ls::memls::MemLs;
 use crate::util::{dav_method, DavMethod, DavMethodSet};
 
 use crate::errors::DavError;
 use crate::fs::*;
 use crate::ls::*;
 use crate::DavResult;
+
+pub mod handle_copymove;
+pub mod handle_delete;
+pub mod handle_gethead;
+use handle_gethead::READ_BUF_SIZE;
+pub mod handle_lock;
+pub mod handle_mkcol;
+pub mod handle_options;
+pub mod handle_props;
+pub mod handle_put;
 
 /// Configuration of the handler.
 #[derive(Clone)]

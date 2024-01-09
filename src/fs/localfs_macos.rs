@@ -23,7 +23,7 @@ use parking_lot::Mutex;
 
 use crate::davpath::DavPath;
 use crate::fs::*;
-use crate::localfs::LocalFs;
+use super::localfs::LocalFs;
 
 const DU_CACHE_ENTRIES: usize = 4096;
 const DU_CACHE_MAX_AGE: u64 = 60;

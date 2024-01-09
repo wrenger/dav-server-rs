@@ -12,6 +12,9 @@ use std::fmt::Debug;
 use std::time::{Duration, SystemTime};
 use xmltree::Element;
 
+pub mod fakels;
+pub mod memls;
+
 /// Type of the locks returned by DavLockSystem methods.
 #[derive(Debug, Clone)]
 pub struct DavLock {

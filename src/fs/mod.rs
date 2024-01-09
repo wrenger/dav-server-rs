@@ -13,6 +13,19 @@ use http::StatusCode;
 
 use crate::davpath::DavPath;
 
+#[cfg(any(docsrs, feature = "localfs"))]
+#[cfg_attr(docsrs, doc(cfg(feature = "localfs")))]
+pub mod localfs;
+#[cfg(any(docsrs, feature = "localfs"))]
+#[cfg_attr(docsrs, doc(cfg(feature = "localfs")))]
+pub mod localfs_macos;
+#[cfg(any(docsrs, feature = "localfs"))]
+#[cfg_attr(docsrs, doc(cfg(feature = "localfs")))]
+pub mod localfs_windows;
+#[cfg(any(docsrs, feature = "memfs"))]
+#[cfg_attr(docsrs, doc(cfg(feature = "memfs")))]
+pub mod memfs;
+
 macro_rules! notimplemented {
     ($method:expr) => {
         Err(FsError::NotImplemented)
