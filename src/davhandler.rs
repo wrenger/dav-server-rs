@@ -4,6 +4,7 @@
 //
 use std::error::Error as StdError;
 use std::io;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use bytes::{self, buf::Buf};
@@ -15,80 +16,152 @@ use http_body::Body as HttpBody;
 use crate::body::{Body, StreamBody};
 use crate::davheaders;
 use crate::davpath::DavPath;
+use crate::fakels::FakeLs;
+use crate::handle_gethead::READ_BUF_SIZE;
+use crate::localfs::LocalFs;
+use crate::memfs::MemFs;
+use crate::memls::MemLs;
 use crate::util::{dav_method, DavMethod, DavMethodSet};
 
 use crate::errors::DavError;
 use crate::fs::*;
 use crate::ls::*;
-use crate::voidfs::{is_voidfs, VoidFs};
 use crate::DavResult;
 
-/// The webdav handler struct.
-///
-/// The `new` and `build` etc methods are used to instantiate a handler.
-///
-/// The `handle` and `handle_with` methods are the methods that do the actual work.
-#[derive(Clone)]
-pub struct DavHandler {
-    pub(crate) config: Arc<DavConfig>,
-}
-
 /// Configuration of the handler.
-#[derive(Default)]
-pub struct DavConfig {
+#[derive(Clone)]
+pub struct DavBuilder {
     // Prefix to be stripped off when handling request.
-    pub(crate) prefix: Option<String>,
+    prefix: String,
     // Filesystem backend.
-    pub(crate) fs: Option<Box<dyn DavFileSystem>>,
+    fs: FileSystem,
     // Locksystem backend.
-    pub(crate) ls: Option<Box<dyn DavLockSystem>>,
-    // Set of allowed methods (None means "all methods")
-    pub(crate) allow: Option<DavMethodSet>,
+    ls: Option<LockSystem>,
+    // Set of allowed methods (Defaults to "all methods")
+    allow: DavMethodSet,
     // Principal is webdav speak for "user", used to give locks an owner (if a locksystem is
     // active).
-    pub(crate) principal: Option<String>,
-    // Hide symbolic links? `None` maps to `true`.
-    pub(crate) hide_symlinks: Option<bool>,
+    principal: Option<String>,
+    // Hide symbolic links? Defaults to `true`.
+    hide_symlinks: bool,
     // Does GET on a directory return indexes.
-    pub(crate) autoindex: Option<bool>,
-    // index.html
-    pub(crate) indexfile: Option<String>,
+    autoindex: Option<bool>,
     // read buffer size in bytes
-    pub(crate) read_buf_size: Option<usize>,
+    read_buf_size: usize,
     // Does GET on a file return 302 redirect.
-    pub(crate) redirect: Option<bool>,
+    redirect: bool,
 }
 
-impl DavConfig {
+impl Default for DavBuilder {
+    fn default() -> Self {
+        DavBuilder {
+            prefix: String::new(),
+            fs: FileSystem::default(),
+            ls: None,
+            allow: DavMethodSet::all(),
+            principal: None,
+            hide_symlinks: true,
+            autoindex: None,
+            read_buf_size: READ_BUF_SIZE,
+            redirect: false,
+        }
+    }
+}
+
+#[derive(Default, Clone)]
+pub enum FileSystem {
+    #[default]
+    Mem,
+    Local {
+        base: PathBuf,
+        public: bool,
+        case_insensitive: bool,
+        macos: bool,
+    },
+    LocalFile {
+        file: PathBuf,
+        public: bool,
+    },
+}
+
+impl FileSystem {
+    pub fn local(
+        path: impl Into<PathBuf>,
+        public: bool,
+        case_insensitive: bool,
+        macos: bool,
+    ) -> Self {
+        FileSystem::Local {
+            base: path.into(),
+            public,
+            case_insensitive,
+            macos,
+        }
+    }
+    pub fn local_file(file: impl Into<PathBuf>, public: bool) -> Self {
+        FileSystem::LocalFile {
+            file: file.into(),
+            public,
+        }
+    }
+    fn build(self) -> Arc<dyn DavFileSystem> {
+        match self {
+            FileSystem::Mem => MemFs::new(),
+            FileSystem::Local {
+                base: path,
+                public,
+                case_insensitive,
+                macos,
+            } => LocalFs::new(path, public, case_insensitive, macos),
+            FileSystem::LocalFile { file, public } => LocalFs::new_file(file, public),
+        }
+    }
+}
+
+#[derive(Default, Clone, Copy)]
+pub enum LockSystem {
+    #[default]
+    Mem,
+    Fake,
+}
+
+impl LockSystem {
+    fn build(self) -> Arc<dyn DavLockSystem> {
+        match self {
+            LockSystem::Mem => MemLs::new(),
+            LockSystem::Fake => FakeLs::new(),
+        }
+    }
+}
+
+impl DavBuilder {
     /// Create a new configuration builder.
-    pub fn new() -> DavConfig {
-        DavConfig::default()
+    pub fn new() -> DavBuilder {
+        DavBuilder::default()
     }
 
     /// Use the configuration that was built to generate a DavConfig.
-    pub fn build_handler(self) -> DavHandler {
-        DavHandler {
-            config: Arc::new(self),
-        }
+    pub fn build(self) -> DavHandler {
+        self.into()
     }
 
     /// Prefix to be stripped off before translating the rest of
     /// the request path to a filesystem path.
     pub fn strip_prefix(self, prefix: impl Into<String>) -> Self {
         let mut this = self;
-        this.prefix = Some(prefix.into());
+        this.prefix = prefix.into();
         this
     }
 
     /// Set the filesystem to use.
-    pub fn filesystem(self, fs: Box<dyn DavFileSystem>) -> Self {
+    pub fn filesystem(self, fs: FileSystem) -> Self {
         let mut this = self;
-        this.fs = Some(fs);
+        this.fs = fs;
         this
     }
 
     /// Set the locksystem to use.
-    pub fn locksystem(self, ls: Box<dyn DavLockSystem>) -> Self {
+    pub fn locksystem(self, ls: LockSystem) -> Self {
         let mut this = self;
         this.ls = Some(ls);
         this
@@ -97,7 +170,7 @@ impl DavConfig {
     /// Which methods to allow (default is all methods).
     pub fn methods(self, allow: DavMethodSet) -> Self {
         let mut this = self;
-        this.allow = Some(allow);
+        this.allow = allow;
         this
     }
 
@@ -111,7 +184,7 @@ impl DavConfig {
     /// Hide symbolic links (default is true)
     pub fn hide_symlinks(self, hide: bool) -> Self {
         let mut this = self;
-        this.hide_symlinks = Some(hide);
+        this.hide_symlinks = hide;
         this
     }
 
@@ -122,130 +195,64 @@ impl DavConfig {
         this
     }
 
-    /// Indexfile to show (index.html, usually).
-    pub fn indexfile(self, indexfile: impl Into<String>) -> Self {
-        let mut this = self;
-        this.indexfile = Some(indexfile.into());
-        this
-    }
-
     /// Read buffer size in bytes
     pub fn read_buf_size(self, size: usize) -> Self {
         let mut this = self;
-        this.read_buf_size = Some(size);
+        this.read_buf_size = size;
         this
     }
 
     pub fn redirect(self, redirect: bool) -> Self {
         let mut this = self;
-        this.redirect = Some(redirect);
+        this.redirect = redirect;
         this
     }
-
-    fn merge(&self, new: DavConfig) -> DavConfig {
-        DavConfig {
-            prefix: new.prefix.or_else(|| self.prefix.clone()),
-            fs: new.fs.or_else(|| self.fs.clone()),
-            ls: new.ls.or_else(|| self.ls.clone()),
-            allow: new.allow.or(self.allow),
-            principal: new.principal.or_else(|| self.principal.clone()),
-            hide_symlinks: new.hide_symlinks.or(self.hide_symlinks),
-            autoindex: new.autoindex.or(self.autoindex),
-            indexfile: new.indexfile.or_else(|| self.indexfile.clone()),
-            read_buf_size: new.read_buf_size.or(self.read_buf_size),
-            redirect: new.redirect.or(self.redirect),
-        }
-    }
 }
 
-// The actual inner struct.
-//
-// At the start of the request, DavConfig is used to generate
-// a DavInner struct. DavInner::handle then handles the request.
-pub(crate) struct DavInner {
-    pub prefix: String,
-    pub fs: Box<dyn DavFileSystem>,
-    pub ls: Option<Box<dyn DavLockSystem>>,
-    pub allow: Option<DavMethodSet>,
-    pub principal: Option<String>,
-    pub hide_symlinks: Option<bool>,
-    pub autoindex: Option<bool>,
-    pub indexfile: Option<String>,
-    pub read_buf_size: Option<usize>,
-    pub redirect: Option<bool>,
+/// The webdav handler struct.
+///
+/// The `new` and `build` etc methods are used to instantiate a handler.
+///
+/// The `handle` and `handle_with` methods are the methods that do the actual work.
+#[derive(Clone)]
+pub struct DavHandler {
+    pub(crate) prefix: Arc<String>,
+    pub(crate) fs: Arc<dyn DavFileSystem>,
+    pub(crate) ls: Option<Arc<dyn DavLockSystem>>,
+    pub(crate) allow: DavMethodSet,
+    pub(crate) principal: Option<Arc<String>>,
+    pub(crate) hide_symlinks: bool,
+    pub(crate) autoindex: Option<bool>,
+    pub(crate) read_buf_size: usize,
+    pub(crate) redirect: bool,
 }
 
-impl From<DavConfig> for DavInner {
-    fn from(cfg: DavConfig) -> Self {
-        DavInner {
-            prefix: cfg.prefix.unwrap_or_default(),
-            fs: cfg.fs.unwrap_or_else(|| VoidFs::new()),
-            ls: cfg.ls,
+impl From<DavBuilder> for DavHandler {
+    fn from(cfg: DavBuilder) -> Self {
+        Self {
+            prefix: Arc::new(cfg.prefix),
+            fs: cfg.fs.build(),
+            ls: cfg.ls.map(|ls| ls.build()),
             allow: cfg.allow,
-            principal: cfg.principal,
+            principal: cfg.principal.map(Arc::new),
             hide_symlinks: cfg.hide_symlinks,
             autoindex: cfg.autoindex,
-            indexfile: cfg.indexfile,
             read_buf_size: cfg.read_buf_size,
             redirect: cfg.redirect,
         }
     }
 }
 
-impl From<&DavConfig> for DavInner {
-    fn from(cfg: &DavConfig) -> Self {
-        DavInner {
-            prefix: cfg
-                .prefix
-                .as_ref()
-                .map(|p| p.to_owned())
-                .unwrap_or_default(),
-            fs: cfg.fs.clone().unwrap(),
-            ls: cfg.ls.clone(),
-            allow: cfg.allow,
-            principal: cfg.principal.clone(),
-            hide_symlinks: cfg.hide_symlinks,
-            autoindex: cfg.autoindex,
-            indexfile: cfg.indexfile.clone(),
-            read_buf_size: cfg.read_buf_size,
-            redirect: cfg.redirect,
-        }
-    }
-}
-
-impl Clone for DavInner {
-    fn clone(&self) -> Self {
-        DavInner {
-            prefix: self.prefix.clone(),
-            fs: self.fs.clone(),
-            ls: self.ls.clone(),
-            allow: self.allow,
-            principal: self.principal.clone(),
-            hide_symlinks: self.hide_symlinks,
-            autoindex: self.autoindex,
-            indexfile: self.indexfile.clone(),
-            read_buf_size: self.read_buf_size,
-            redirect: self.redirect,
-        }
+impl From<&DavBuilder> for DavHandler {
+    fn from(cfg: &DavBuilder) -> Self {
+        Self::from(cfg.clone())
     }
 }
 
 impl DavHandler {
-    /// Create a new `DavHandler`.
-    ///
-    /// This returns a DavHandler with an empty configuration. That's only
-    /// useful if you use the `handle_with` method instead of `handle`.
-    /// Normally you should create a new `DavHandler` using `DavHandler::build`
-    /// and configure at least the filesystem, and probably the strip_prefix.
-    pub fn new() -> DavHandler {
-        DavHandler {
-            config: Arc::new(DavConfig::default()),
-        }
-    }
-
     /// Return a configuration builder.
-    pub fn builder() -> DavConfig {
-        DavConfig::new()
+    pub fn builder() -> DavBuilder {
+        DavBuilder::new()
     }
 
     /// Handle a webdav request.
@@ -255,8 +262,7 @@ impl DavHandler {
         ReqError: StdError + Send + Sync + 'static,
         ReqBody: HttpBody<Data = ReqData, Error = ReqError>,
     {
-        let inner = DavInner::from(&*self.config);
-        inner.handle(req).await
+        self.handle_inner(req).await
     }
 
     /// Handle a webdav request, overriding parts of the config.
@@ -268,16 +274,27 @@ impl DavHandler {
     /// windows or macos client that needs to see locking support.
     pub async fn handle_with<ReqBody, ReqData, ReqError>(
         &self,
-        config: DavConfig,
         req: Request<ReqBody>,
+        prefix: Option<String>,
+        principal: Option<String>,
     ) -> Response<Body>
     where
         ReqData: Buf + Send + 'static,
         ReqError: StdError + Send + Sync + 'static,
         ReqBody: HttpBody<Data = ReqData, Error = ReqError>,
     {
-        let inner = DavInner::from(self.config.merge(config));
-        inner.handle(req).await
+        let mut this = self.clone();
+        if let Some(prefix) = prefix {
+            this.prefix = Arc::new(format!(
+                "{}/{}",
+                this.prefix.strip_suffix('/').unwrap_or(&this.prefix),
+                prefix.strip_prefix('/').unwrap_or(&prefix)
+            ));
+        }
+        if let Some(principal) = principal {
+            this.principal = Some(Arc::new(principal));
+        }
+        this.handle_inner(req).await
     }
 
     /// Handles a request with a `Stream` body instead of a `HttpBody`.
@@ -297,16 +314,16 @@ impl DavHandler {
             let (parts, body) = req.into_parts();
             Request::from_parts(parts, StreamBody::new(body))
         };
-        let inner = DavInner::from(&*self.config);
-        inner.handle(req).await
+        self.handle_inner(req).await
     }
 
     /// Handles a request with a `Stream` body instead of a `HttpBody`.
     #[doc(hidden)]
     pub async fn handle_stream_with<ReqBody, ReqData, ReqError>(
         &self,
-        config: DavConfig,
         req: Request<ReqBody>,
+        prefix: Option<String>,
+        principal: Option<String>,
     ) -> Response<Body>
     where
         ReqData: Buf + Send + 'static,
@@ -317,18 +334,18 @@ impl DavHandler {
             let (parts, body) = req.into_parts();
             Request::from_parts(parts, StreamBody::new(body))
         };
-        let inner = DavInner::from(self.config.merge(config));
-        inner.handle(req).await
+        let mut this = self.clone();
+        if let Some(prefix) = prefix {
+            this.prefix = Arc::new(prefix);
+        }
+        if let Some(principal) = principal {
+            this.principal = Some(Arc::new(principal));
+        }
+        this.handle_inner(req).await
     }
 }
 
-impl Default for DavHandler {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl DavInner {
+impl DavHandler {
     // helper.
     pub(crate) async fn has_parent<'a>(&'a self, path: &'a DavPath) -> bool {
         let p = path.parent();
@@ -396,7 +413,10 @@ impl DavInner {
     }
 
     // internal dispatcher.
-    async fn handle<ReqBody, ReqData, ReqError>(self, req: Request<ReqBody>) -> Response<Body>
+    async fn handle_inner<ReqBody, ReqData, ReqError>(
+        &self,
+        req: Request<ReqBody>,
+    ) -> Response<Body>
     where
         ReqBody: HttpBody<Data = ReqData, Error = ReqError>,
         ReqData: Buf + Send + 'static,
@@ -445,7 +465,7 @@ impl DavInner {
 
     // internal dispatcher part 2.
     async fn handle2<ReqBody, ReqData, ReqError>(
-        mut self,
+        &self,
         req: Request<ReqBody>,
     ) -> DavResult<Response<Body>>
     where
@@ -474,38 +494,14 @@ impl DavInner {
             }
         };
 
-        // See if method makes sense if we do not have a fileystem.
-        if is_voidfs(&self.fs) {
-            match method {
-                DavMethod::Options => {
-                    if self
-                        .allow
-                        .as_ref()
-                        .map(|a| a.contains(DavMethod::Options))
-                        .unwrap_or(true)
-                    {
-                        let mut a = DavMethodSet::none();
-                        a.add(DavMethod::Options);
-                        self.allow = Some(a);
-                    }
-                }
-                _ => {
-                    debug!("no filesystem: method not allowed on request {}", req.uri());
-                    return Err(DavError::StatusClose(StatusCode::METHOD_NOT_ALLOWED));
-                }
-            }
-        }
-
         // see if method is allowed.
-        if let Some(ref a) = self.allow {
-            if !a.contains(method) {
-                debug!(
-                    "method {} not allowed on request {}",
-                    req.method(),
-                    req.uri()
-                );
-                return Err(DavError::StatusClose(StatusCode::METHOD_NOT_ALLOWED));
-            }
+        if !self.allow.contains(method) {
+            debug!(
+                "method {} not allowed on request {}",
+                req.method(),
+                req.uri()
+            );
+            return Err(DavError::StatusClose(StatusCode::METHOD_NOT_ALLOWED));
         }
 
         // make sure the request path is valid.

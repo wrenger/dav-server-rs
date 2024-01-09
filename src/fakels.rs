@@ -12,6 +12,7 @@
 //! If: headers always succeeds, and nothing is every really locked.
 //!
 //! `FakeLs` implements such a fake locksystem.
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use uuid::Uuid;
@@ -26,8 +27,8 @@ pub struct FakeLs {}
 
 impl FakeLs {
     /// Create a new "fakels" locksystem.
-    pub fn new() -> Box<FakeLs> {
-        Box::new(FakeLs {})
+    pub fn new() -> Arc<FakeLs> {
+        Arc::new(FakeLs {})
     }
 }
 

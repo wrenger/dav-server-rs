@@ -70,9 +70,9 @@ struct MemFsFile {
 
 impl MemFs {
     /// Create a new "memfs" filesystem.
-    pub fn new() -> Box<MemFs> {
+    pub fn new() -> Arc<MemFs> {
         let root = MemFsNode::new_dir();
-        Box::new(MemFs {
+        Arc::new(MemFs {
             tree: Arc::new(Mutex::new(Tree::new(root))),
         })
     }

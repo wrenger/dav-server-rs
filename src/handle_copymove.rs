@@ -25,7 +25,7 @@ async fn add_status<'a>(
     Err(daverror)
 }
 
-impl crate::DavInner {
+impl crate::DavHandler {
     pub(crate) fn do_copy<'a>(
         &'a self,
         source: &'a DavPath,
@@ -141,7 +141,7 @@ impl crate::DavInner {
     }
 
     pub(crate) async fn handle_copymove(
-        self,
+        &self,
         req: &Request<()>,
         method: DavMethod,
     ) -> DavResult<Response<Body>> {
@@ -230,7 +230,7 @@ impl crate::DavInner {
         // just a simple status.
         if let Some(ref locksystem) = self.ls {
             let t = tokens.iter().map(|s| s.as_str()).collect::<Vec<&str>>();
-            let principal = self.principal.as_deref();
+            let principal = self.principal.as_deref().map(|s| s.as_str());
             if method == DavMethod::Move {
                 // for MOVE check if source path is locked
                 if let Err(_l) = locksystem.check(&path, principal, false, true, t.clone()) {
@@ -246,13 +246,14 @@ impl crate::DavInner {
         let req_path = path.clone();
 
         let items = AsyncStream::new(|tx| {
+            let this: Self = self.clone();
             async move {
                 let mut multierror = MultiError::new(tx);
 
                 // see if we need to delete the destination first.
                 if overwrite && exists && depth != Depth::Zero && !dest_is_file {
                     trace!("handle_copymove: deleting destination {}", dest);
-                    if self
+                    if this
                         .delete_items(&mut multierror, Depth::Infinity, dmeta.unwrap(), &dest)
                         .await
                         .is_err()
@@ -260,14 +261,14 @@ impl crate::DavInner {
                         return Ok(());
                     }
                     // should really do this per item, in case the delete partially fails. See TODO.md
-                    if let Some(ref locksystem) = self.ls {
+                    if let Some(ref locksystem) = this.ls {
                         let _ = locksystem.delete(&dest);
                     }
                 }
 
                 // COPY or MOVE.
                 if method == DavMethod::Copy {
-                    if self
+                    if this
                         .do_copy(&path, &dest, &dest, depth, &mut multierror)
                         .await
                         .is_ok()
@@ -281,8 +282,8 @@ impl crate::DavInner {
                     }
                 } else {
                     // move and if successful, remove locks at old location.
-                    if self.do_move(&path, &dest, &mut multierror).await.is_ok() {
-                        if let Some(ref locksystem) = self.ls {
+                    if this.do_move(&path, &dest, &mut multierror).await.is_ok() {
+                        if let Some(ref locksystem) = this.ls {
                             locksystem.delete(&path).ok();
                         }
                         let s = if exists {

@@ -52,9 +52,9 @@ where
     }
 }
 
-impl crate::DavInner {
+impl crate::DavHandler {
     pub(crate) async fn handle_put<ReqBody, ReqData, ReqError>(
-        self,
+        &self,
         req: &Request<()>,
         body: ReqBody,
     ) -> DavResult<Response<Body>>
@@ -184,7 +184,7 @@ impl crate::DavInner {
         // if locked check if we hold that lock.
         if let Some(ref locksystem) = self.ls {
             let t = tokens.iter().map(|s| s.as_str()).collect::<Vec<&str>>();
-            let principal = self.principal.as_deref();
+            let principal = self.principal.as_deref().map(|s| s.as_str());
             if let Err(_l) = locksystem.check(&path, principal, false, false, t) {
                 return Err(DavError::StatusClose(SC::LOCKED));
             }

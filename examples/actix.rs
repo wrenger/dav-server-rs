@@ -2,12 +2,15 @@ use std::io;
 
 use actix_web::{web, App, HttpServer};
 use dav_server::actix::*;
-use dav_server::{fakels::FakeLs, localfs::LocalFs, DavConfig, DavHandler};
+use dav_server::{DavHandler, FileSystem, LockSystem};
 
 pub async fn dav_handler(req: DavRequest, davhandler: web::Data<DavHandler>) -> DavResponse {
     if let Some(prefix) = req.prefix() {
-        let config = DavConfig::new().strip_prefix(prefix);
-        davhandler.handle_with(config, req.request).await.into()
+        let prefix = prefix.to_owned();
+        davhandler
+            .handle_with(req.request, Some(prefix), None)
+            .await
+            .into()
     } else {
         davhandler.handle(req.request).await.into()
     }
@@ -20,9 +23,9 @@ async fn main() -> io::Result<()> {
     let dir = "/tmp";
 
     let dav_server = DavHandler::builder()
-        .filesystem(LocalFs::new(dir, false, false, false))
-        .locksystem(FakeLs::new())
-        .build_handler();
+        .filesystem(FileSystem::local(dir, false, false, false))
+        .locksystem(LockSystem::Fake)
+        .build();
 
     println!("actix-web example: listening on {} serving {}", addr, dir);
 

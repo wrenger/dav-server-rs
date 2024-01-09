@@ -7,7 +7,7 @@ use futures_util::{future::BoxFuture, FutureExt, StreamExt};
 use headers::HeaderMapExt;
 use http::{Request, Response, StatusCode};
 
-use crate::xmltree_ext::*;
+use crate::{xmltree_ext::*, DavHandler};
 use xml::common::XmlVersion;
 use xml::writer::EventWriter;
 use xml::writer::XmlEvent as XmlWEvent;
@@ -25,7 +25,7 @@ use crate::handle_lock::{list_lockdiscovery, list_supportedlock};
 use crate::ls::*;
 use crate::util::MemBuffer;
 use crate::util::{dav_xml_error, systemtime_to_httpdate, systemtime_to_rfc3339};
-use crate::{DavInner, DavResult};
+use crate::DavResult;
 
 const NS_APACHE_URI: &str = "http://apache.org/dav/props/";
 const NS_DAV_URI: &str = "DAV:";
@@ -128,9 +128,9 @@ fn init_staticprop(p: &[&str]) -> Vec<Element> {
     v
 }
 
-impl DavInner {
+impl DavHandler {
     pub(crate) async fn handle_propfind(
-        self,
+        &self,
         req: &Request<()>,
         xmldata: &[u8],
     ) -> DavResult<Response<Body>> {
@@ -201,6 +201,7 @@ impl DavInner {
 
         let mut pw = PropWriter::new(req, &mut res, name, props, &*self.fs, self.ls.as_deref())?;
 
+        let this = self.clone();
         *res.body_mut() = Body::from(AsyncStream::new(|tx| async move {
             pw.set_tx(tx);
             let is_dir = meta.is_dir();
@@ -208,7 +209,7 @@ impl DavInner {
             pw.flush().await?;
 
             if is_dir && depth != davheaders::Depth::Zero {
-                let _ = self.propfind_directory(&path, depth, &mut pw).await;
+                let _ = this.propfind_directory(&path, depth, &mut pw).await;
             }
             pw.close().await?;
 
@@ -225,11 +226,12 @@ impl DavInner {
         propwriter: &'a mut PropWriter,
     ) -> BoxFuture<'a, DavResult<()>> {
         async move {
-            let readdir_meta = match self.hide_symlinks {
-                Some(true) | None => ReadDirMeta::DataSymlink,
-                Some(false) => ReadDirMeta::Data,
+            let readdir_meta = if self.hide_symlinks {
+                ReadDirMeta::DataSymlink
+            } else {
+                ReadDirMeta::Data
             };
-            let mut entries = match self.fs.read_dir(path, readdir_meta).await {
+            let mut entries = match self.fs.read_dir(&path, readdir_meta).await {
                 Ok(entries) => entries,
                 Err(e) => {
                     // if we cannot read_dir, just skip it.
@@ -364,7 +366,7 @@ impl DavInner {
     }
 
     pub(crate) async fn handle_proppatch(
-        self,
+        &self,
         req: &Request<()>,
         xmldata: &[u8],
     ) -> DavResult<Response<Body>> {
@@ -392,7 +394,7 @@ impl DavInner {
         // if locked check if we hold that lock.
         if let Some(ref locksystem) = self.ls {
             let t = tokens.iter().map(|s| s.as_str()).collect::<Vec<&str>>();
-            let principal = self.principal.as_deref();
+            let principal = self.principal.as_deref().map(|s| s.as_str());
             if let Err(_l) = locksystem.check(&path, principal, false, false, t) {
                 return Err(StatusCode::LOCKED.into());
             }

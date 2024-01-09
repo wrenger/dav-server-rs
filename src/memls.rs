@@ -33,12 +33,12 @@ struct MemLsInner {
 
 impl MemLs {
     /// Create a new "memls" locksystem.
-    pub fn new() -> Box<MemLs> {
+    pub fn new() -> Arc<MemLs> {
         let inner = MemLsInner {
             tree: Tree::new(Vec::new()),
             locks: HashMap::new(),
         };
-        Box::new(MemLs(Arc::new(Mutex::new(inner))))
+        Arc::new(MemLs(Arc::new(Mutex::new(inner))))
     }
 }
 

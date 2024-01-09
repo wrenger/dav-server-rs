@@ -1,4 +1,4 @@
-use dav_server::{fakels::FakeLs, localfs::LocalFs, DavHandler};
+use dav_server::{DavHandler, FileSystem, LockSystem};
 use std::convert::Infallible;
 
 #[tokio::main]
@@ -8,9 +8,9 @@ async fn main() {
     let addr = ([127, 0, 0, 1], 4918).into();
 
     let dav_server = DavHandler::builder()
-        .filesystem(LocalFs::new(dir, false, false, false))
-        .locksystem(FakeLs::new())
-        .build_handler();
+        .filesystem(FileSystem::local(dir, false, false, false))
+        .locksystem(LockSystem::Fake)
+        .build();
 
     let make_service = hyper::service::make_service_fn(move |_| {
         let dav_server = dav_server.clone();

@@ -18,7 +18,7 @@ use crate::util::MemBuffer;
 use crate::xmltree_ext::{self, ElementExt};
 use crate::DavResult;
 
-impl crate::DavInner {
+impl crate::DavHandler {
     pub(crate) async fn handle_lock(
         &self,
         req: &Request<()>,
@@ -143,7 +143,7 @@ impl crate::DavInner {
 
         // create lock
         let timeout = get_timeout(req, false, shared);
-        let principal = self.principal.as_deref();
+            let principal = self.principal.as_deref().map(|s| s.as_str());
         let lock = match locksystem.lock(&path, principal, owner.as_ref(), timeout, shared, deep) {
             Ok(lock) => lock,
             Err(_) => return Err(SC::LOCKED.into()),

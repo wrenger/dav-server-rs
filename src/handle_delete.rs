@@ -34,7 +34,7 @@ async fn dir_status<'a>(res: &'a mut MultiError, path: &'a DavPath, e: FsError) 
     DavError::Status(status)
 }
 
-impl crate::DavInner {
+impl crate::DavHandler {
     pub(crate) fn delete_items<'a>(
         &'a self,
         res: &'a mut MultiError,
@@ -105,7 +105,7 @@ impl crate::DavInner {
         .boxed()
     }
 
-    pub(crate) async fn handle_delete(self, req: &Request<()>) -> DavResult<Response<Body>> {
+    pub(crate) async fn handle_delete(&self, req: &Request<()>) -> DavResult<Response<Body>> {
         // RFC4918 9.6.1 DELETE for Collections.
         // Note that allowing Depth: 0 is NOT RFC compliant.
         let depth = match req.headers().typed_get::<Depth>() {
@@ -136,7 +136,7 @@ impl crate::DavInner {
         // just a simple status.
         if let Some(ref locksystem) = self.ls {
             let t = tokens.iter().map(|s| s.as_str()).collect::<Vec<&str>>();
-            let principal = self.principal.as_deref();
+            let principal = self.principal.as_deref().map(|s| s.as_str());
             if let Err(_l) = locksystem.check(&path, principal, false, true, t) {
                 return Err(DavError::Status(StatusCode::LOCKED));
             }
@@ -145,16 +145,17 @@ impl crate::DavInner {
         let req_path = path.clone();
 
         let items = AsyncStream::new(|tx| {
+            let this = self.clone();
             async move {
                 // turn the Sink into something easier to pass around.
                 let mut multierror = MultiError::new(tx);
 
                 // now delete the path recursively.
-                let fut = self.delete_items(&mut multierror, depth, meta, &path);
+                let fut = this.delete_items(&mut multierror, depth, meta, &path);
                 if let Ok(()) = fut.await {
                     // Done. Now delete the path in the locksystem as well.
                     // Should really do this per resource, in case the delete partially fails. See TODO.pm
-                    if let Some(ref locksystem) = self.ls {
+                    if let Some(ref locksystem) = this.ls {
                         locksystem.delete(&path).ok();
                     }
                     let _ = multierror.add_status(&path, StatusCode::NO_CONTENT).await;

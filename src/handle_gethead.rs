@@ -26,9 +26,9 @@ const BOUNDARY: &str = "BOUNDARY";
 const BOUNDARY_START: &str = "\n--BOUNDARY\n";
 const BOUNDARY_END: &str = "\n--BOUNDARY--\n";
 
-const READ_BUF_SIZE: usize = 16384;
+pub const READ_BUF_SIZE: usize = 16384;
 
-impl crate::DavInner {
+impl crate::DavHandler {
     pub(crate) async fn handle_get(&self, req: &Request<()>) -> DavResult<Response<Body>> {
         let head = req.method() == http::Method::HEAD;
         let mut path = self.path(req);
@@ -53,13 +53,8 @@ impl crate::DavInner {
                 return Ok(res);
             }
 
-            // If indexfile was set, use it.
-            if let Some(indexfile) = self.indexfile.as_ref() {
-                path.push_segment(indexfile.as_bytes());
-            } else {
-                // Otherwise see if we need to generate a directory index.
-                return self.handle_autoindex(req, head).await;
-            }
+            // Otherwise see if we need to generate a directory index.
+            return self.handle_autoindex(req, head).await;
         }
 
         // double check, is it a regular file.
@@ -93,7 +88,7 @@ impl crate::DavInner {
             res.headers_mut().typed_insert(etag);
         }
 
-        if self.redirect == Some(true) {
+        if self.redirect {
             if let Some(url) = file.redirect_url().await? {
                 res.headers_mut().insert("Location", url.parse().unwrap());
                 *res.status_mut() = StatusCode::FOUND;
@@ -207,7 +202,7 @@ impl crate::DavInner {
         }
 
         // now just loop and send data.
-        let read_buf_size = self.read_buf_size.unwrap_or(READ_BUF_SIZE);
+        let read_buf_size = self.read_buf_size;
         *res.body_mut() = Body::from(AsyncStream::new(|mut tx| {
             async move {
                 let zero = [0; 4096];
@@ -280,10 +275,7 @@ impl crate::DavInner {
         let path = self.path(req);
 
         // Is PROPFIND explicitly allowed?
-        let allow_propfind = self
-            .allow
-            .map(|x| x.contains(DavMethod::PropFind))
-            .unwrap_or(false);
+        let allow_propfind = self.allow.contains(DavMethod::PropFind);
 
         // Only allow index generation if explicitly set to true, _or_ if it was
         // unset, and PROPFIND is explicitly allowed.

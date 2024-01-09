@@ -140,7 +140,7 @@ impl LocalFs {
         public: bool,
         case_insensitive: bool,
         macos: bool,
-    ) -> Box<LocalFs> {
+    ) -> Arc<LocalFs> {
         let inner = LocalFsInner {
             basedir: base.as_ref().to_path_buf(),
             public,
@@ -149,7 +149,7 @@ impl LocalFs {
             is_file: false,
             fs_access_guard: None,
         };
-        Box::new({
+        Arc::new({
             LocalFs {
                 inner: Arc::new(inner),
             }
@@ -160,7 +160,7 @@ impl LocalFs {
     ///
     /// This is like `new()`, but it always serves this single file.
     /// The request path is ignored.
-    pub fn new_file<P: AsRef<Path>>(file: P, public: bool) -> Box<LocalFs> {
+    pub fn new_file<P: AsRef<Path>>(file: P, public: bool) -> Arc<LocalFs> {
         let inner = LocalFsInner {
             basedir: file.as_ref().to_path_buf(),
             public,
@@ -169,31 +169,7 @@ impl LocalFs {
             is_file: true,
             fs_access_guard: None,
         };
-        Box::new({
-            LocalFs {
-                inner: Arc::new(inner),
-            }
-        })
-    }
-
-    // Like new() but pass in a fs_access_guard hook.
-    #[doc(hidden)]
-    pub fn new_with_fs_access_guard<P: AsRef<Path>>(
-        base: P,
-        public: bool,
-        case_insensitive: bool,
-        macos: bool,
-        fs_access_guard: Option<Box<dyn Fn() -> Box<dyn Any> + Send + Sync + 'static>>,
-    ) -> Box<LocalFs> {
-        let inner = LocalFsInner {
-            basedir: base.as_ref().to_path_buf(),
-            public,
-            macos,
-            case_insensitive,
-            is_file: false,
-            fs_access_guard,
-        };
-        Box::new({
+        Arc::new({
             LocalFs {
                 inner: Arc::new(inner),
             }

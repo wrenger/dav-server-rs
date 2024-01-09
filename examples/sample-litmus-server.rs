@@ -14,7 +14,7 @@ use clap::Parser;
 use futures_util::future::TryFutureExt;
 use headers::{authorization::Basic, Authorization, HeaderMapExt};
 
-use dav_server::{body::Body, fakels, localfs, memfs, memls, DavConfig, DavHandler};
+use dav_server::{body::Body, DavHandler, FileSystem, LockSystem};
 
 #[derive(Clone)]
 struct Server {
@@ -26,19 +26,19 @@ impl Server {
     pub fn new(directory: String, memls: bool, fakels: bool, auth: bool) -> Self {
         let mut config = DavHandler::builder();
         if !directory.is_empty() {
-            config = config.filesystem(localfs::LocalFs::new(directory, true, true, true));
+            config = config.filesystem(FileSystem::local(directory, true, true, true));
         } else {
-            config = config.filesystem(memfs::MemFs::new());
+            config = config.filesystem(FileSystem::Mem);
         };
         if fakels {
-            config = config.locksystem(fakels::FakeLs::new());
+            config = config.locksystem(LockSystem::Fake);
         }
         if memls {
-            config = config.locksystem(memls::MemLs::new());
+            config = config.locksystem(LockSystem::Mem);
         }
 
         Server {
-            dh: config.build_handler(),
+            dh: config.build(),
             auth,
         }
     }
@@ -66,8 +66,7 @@ impl Server {
         };
 
         if let Some(user) = user {
-            let config = DavConfig::new().principal(user);
-            Ok(self.dh.handle_with(config, req).await)
+            Ok(self.dh.handle_with(req, None, Some(user)).await)
         } else {
             Ok(self.dh.handle(req).await)
         }

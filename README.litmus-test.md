@@ -146,4 +146,3 @@ $ TESTS="http basic copymove locks props" HTDOCS=htdocs TESTROOT=. ./litmus http
 29. finish................ pass
 <- summary for `props': of 30 tests run: 30 passed, 0 failed. 100.0%
 ```
-

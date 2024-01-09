@@ -70,7 +70,7 @@
 //!
 //! ```no_run
 //! use std::convert::Infallible;
-//! use dav_server::{fakels::FakeLs, localfs::LocalFs, DavHandler};
+//! use dav_server::{DavHandler, FileSystem, LockSystem};
 //!
 //! #[tokio::main]
 //! async fn main() {
@@ -78,9 +78,9 @@
 //!     let addr = ([127, 0, 0, 1], 4918).into();
 //!
 //!     let dav_server = DavHandler::builder()
-//!         .filesystem(LocalFs::new(dir, false, false, false))
-//!         .locksystem(FakeLs::new())
-//!         .build_handler();
+//!         .filesystem(FileSystem::local(dir, false, false, false))
+//!         .locksystem(LockSystem::Fake)
+//!         .build();
 //!
 //!     let make_service = hyper::service::make_service_fn(move |_| {
 //!         let dav_server = dav_server.clone();
@@ -102,25 +102,6 @@
 //!         .map_err(|e| eprintln!("server error: {}", e));
 //! }
 //! ```
-//! [DavHandler]: struct.DavHandler.html
-//! [DavFileSystem]: fs/index.html
-//! [DavLockSystem]: ls/index.html
-//! [DavProp]: fs/struct.DavProp.html
-//! [`WebDav`]: https://tools.ietf.org/html/rfc4918
-//! [RFC4918]: https://tools.ietf.org/html/rfc4918
-//! [`MemLs`]: memls/index.html
-//! [`MemFs`]: memfs/index.html
-//! [`LocalFs`]: localfs/index.html
-//! [`FakeLs`]: fakels/index.html
-//! [actix-compat]: actix/index.html
-//! [warp-compat]: warp/index.html
-//! [README_litmus]: https://github.com/messense/dav-server-rs/blob/main/README.litmus-test.md
-//! [examples]: https://github.com/messense/dav-server-rs/tree/main/examples/
-//! [PUT]: https://github.com/messense/dav-server-rs/tree/main/doc/Apache-PUT-with-Content-Range.md
-//! [PATCH]: https://github.com/messense/dav-server-rs/tree/main/doc/SABREDAV-partialupdate.md
-//! [hyper]: https://hyper.rs/
-//! [warp]: https://crates.io/crates/warp
-//! [actix-web]: https://actix.rs/
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
@@ -151,21 +132,20 @@ mod localfs_windows;
 mod multierror;
 mod tree;
 mod util;
-mod voidfs;
 mod xmltree_ext;
 
 pub mod body;
 pub mod davpath;
-pub mod fakels;
-pub mod fs;
+mod fakels;
+mod fs;
 #[cfg(any(docsrs, feature = "localfs"))]
 #[cfg_attr(docsrs, doc(cfg(feature = "localfs")))]
-pub mod localfs;
-pub mod ls;
+mod localfs;
+mod ls;
 #[cfg(any(docsrs, feature = "memfs"))]
 #[cfg_attr(docsrs, doc(cfg(feature = "memfs")))]
-pub mod memfs;
-pub mod memls;
+mod memfs;
+mod memls;
 
 #[cfg(any(docsrs, feature = "actix-compat"))]
 #[cfg_attr(docsrs, doc(cfg(feature = "actix-compat")))]
@@ -175,9 +155,8 @@ pub mod actix;
 #[cfg_attr(docsrs, doc(cfg(feature = "warp-compat")))]
 pub mod warp;
 
-pub(crate) use crate::davhandler::DavInner;
-pub(crate) use crate::errors::{DavError, DavResult};
-pub(crate) use crate::fs::*;
+use crate::errors::{DavError, DavResult};
+use crate::fs::*;
 
-pub use crate::davhandler::{DavConfig, DavHandler};
+pub use crate::davhandler::{DavBuilder, DavHandler, FileSystem, LockSystem};
 pub use crate::util::{DavMethod, DavMethodSet};

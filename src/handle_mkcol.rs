@@ -7,7 +7,7 @@ use crate::davheaders;
 use crate::fs::*;
 use crate::{DavError, DavResult};
 
-impl crate::DavInner {
+impl crate::DavHandler {
     pub(crate) async fn handle_mkcol(&self, req: &Request<()>) -> DavResult<Response<Body>> {
         let mut path = self.path(req);
         let meta = self.fs.metadata(&path).await;
@@ -22,7 +22,7 @@ impl crate::DavInner {
         // if locked check if we hold that lock.
         if let Some(ref locksystem) = self.ls {
             let t = tokens.iter().map(|s| s.as_str()).collect::<Vec<&str>>();
-            let principal = self.principal.as_deref();
+            let principal = self.principal.as_deref().map(|s| s.as_str());
             if let Err(_l) = locksystem.check(&path, principal, false, false, t) {
                 return Err(DavError::Status(StatusCode::LOCKED));
             }

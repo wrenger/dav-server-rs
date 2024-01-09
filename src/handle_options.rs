@@ -5,7 +5,7 @@ use crate::body::Body;
 use crate::util::{dav_method, DavMethod};
 use crate::DavResult;
 
-impl crate::DavInner {
+impl crate::DavHandler {
     pub(crate) async fn handle_options(&self, req: &Request<()>) -> DavResult<Response<Body>> {
         let mut res = Response::new(Body::empty());
 
@@ -28,7 +28,7 @@ impl crate::DavInner {
         let mm = |v: &mut Vec<String>, m: &str, y: DavMethod| {
             if (y == DavMethod::Options || (y != method || islock(y) != islock(method)))
                 && (!islock(y) || self.ls.is_some())
-                && self.allow.map(|x| x.contains(y)).unwrap_or(true)
+                && self.allow.contains(y)
             {
                 v.push(m.to_string());
             }

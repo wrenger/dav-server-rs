@@ -8,7 +8,7 @@
 use std::convert::Infallible;
 use std::path::Path;
 
-use crate::{fakels::FakeLs, localfs::LocalFs, DavHandler};
+use crate::{DavHandler, FileSystem, LockSystem};
 use warp::{filters::BoxedFilter, Filter, Reply};
 
 /// Reply-filter that runs a DavHandler.
@@ -40,17 +40,12 @@ pub fn dav_handler(handler: DavHandler) -> BoxedFilter<(impl Reply,)> {
                     }
                     let request = builder.body(body).unwrap();
 
-                    let response = if handler.config.prefix.is_some() {
-                        // Run a handler with the configured path prefix.
-                        handler.handle_stream(request).await
-                    } else {
-                        // Run a handler with the current path prefix.
-                        let path_len = path_str.len();
-                        let tail_len = path_tail.as_str().len();
-                        let prefix = path_str[..path_len - tail_len].to_string();
-                        let config = DavHandler::builder().strip_prefix(prefix);
-                        handler.handle_stream_with(config, request).await
-                    };
+                    let path_len = path_str.len();
+                    let tail_len = path_tail.as_str().len();
+                    let prefix = path_str[..path_len - tail_len].to_string();
+                    let response = handler
+                        .handle_stream_with(request, Some(prefix), None)
+                        .await;
 
                     // Need to remap the http_body::Body to a hyper::Body.
                     let (parts, body) = response.into_parts();
@@ -75,40 +70,35 @@ pub fn dav_handler(handler: DavHandler) -> BoxedFilter<(impl Reply,)> {
 ///   `http://` or `https://` URL for a directory in a browser), but NOT WebDAV listing of a
 ///   directory (HTTP `PROPFIND`). BEWARE: The name and behaviour of this parameter variable may
 ///   change, and later it may control WebDAV `PROPFIND`, too (but not as of now).
-///   
+///
 ///   In release mode, if `auto_index_over_get` is `true`, then this executes as described above
 ///   (currently affecting only HTTP `GET`), but beware of this current behaviour.
-///   
+///
 ///   In debug mode, if `auto_index_over_get` is `false`, this _panics_. That is so that it alerts
 ///   the developers to this current limitation, so they don't accidentally expect
 ///   `auto_index_over_get` to control WebDAV.
 /// - no flags set: 404.
-pub fn dav_dir(
-    base: impl AsRef<Path>,
-    index_html: bool,
-    auto_index_over_get: bool,
-) -> BoxedFilter<(impl Reply,)> {
+pub fn dav_dir(base: impl AsRef<Path>, auto_index_over_get: bool) -> BoxedFilter<(impl Reply,)> {
     debug_assert!(
         auto_index_over_get,
         "See documentation of dav_server::warp::dav_dir(...)."
     );
-    let mut builder = DavHandler::builder()
-        .filesystem(LocalFs::new(base, false, false, false))
-        .locksystem(FakeLs::new())
-        .autoindex(auto_index_over_get);
-    if index_html {
-        builder = builder.indexfile("index.html".to_string())
-    }
-    let handler = builder.build_handler();
-    dav_handler(handler)
+    dav_handler(
+        DavHandler::builder()
+            .filesystem(FileSystem::local(base.as_ref(), false, false, false))
+            .locksystem(LockSystem::Fake)
+            .autoindex(auto_index_over_get)
+            .build(),
+    )
 }
 
 /// Creates a Filter that serves a single file, ignoring the request path,
 /// like `warp::filters::fs::file`.
 pub fn dav_file(file: impl AsRef<Path>) -> BoxedFilter<(impl Reply,)> {
-    let handler = DavHandler::builder()
-        .filesystem(LocalFs::new_file(file, false))
-        .locksystem(FakeLs::new())
-        .build_handler();
-    dav_handler(handler)
+    dav_handler(
+        DavHandler::builder()
+            .filesystem(FileSystem::local_file(file.as_ref(), false))
+            .locksystem(LockSystem::Fake)
+            .build(),
+    )
 }
