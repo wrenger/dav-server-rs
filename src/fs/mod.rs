@@ -144,12 +144,10 @@ pub enum ReadDirMeta {
     Data,
     /// DavDirEntry.metadata() behaves as symlink_metadata()
     DataSymlink,
-    /// No optimizations, otherwise like DataSymlink.
-    None,
 }
 
 /// The trait that defines a filesystem.
-pub trait DavFileSystem: Sync + Send + BoxCloneFs {
+pub trait DavFileSystem: Sync + Send {
     /// Open a file.
     fn open<'a>(&'a self, path: &'a DavPath, options: OpenOptions) -> FsFuture<Box<dyn DavFile>>;
 
@@ -293,27 +291,6 @@ pub trait DavFileSystem: Sync + Send + BoxCloneFs {
     }
 }
 
-// BoxClone trait.
-#[doc(hidden)]
-pub trait BoxCloneFs {
-    fn box_clone(&self) -> Box<dyn DavFileSystem>;
-}
-
-// generic Clone, calls implementation-specific box_clone().
-impl Clone for Box<dyn DavFileSystem> {
-    fn clone(&self) -> Box<dyn DavFileSystem> {
-        self.box_clone()
-    }
-}
-
-// implementation-specific clone.
-#[doc(hidden)]
-impl<FS: Clone + DavFileSystem + 'static> BoxCloneFs for FS {
-    fn box_clone(&self) -> Box<dyn DavFileSystem> {
-        Box::new((*self).clone())
-    }
-}
-
 /// One directory entry (or child node).
 pub trait DavDirEntry: Send + Sync {
     /// Name of the entry.
@@ -359,7 +336,7 @@ pub trait DavFile: Debug + Send + Sync {
 }
 
 /// File metadata. Basically type, length, and some timestamps.
-pub trait DavMetaData: Debug + BoxCloneMd + Send + Sync {
+pub trait DavMetaData: Debug + Send + Sync {
     /// Size of the file.
     fn len(&self) -> u64;
     /// `Modified` timestamp.
@@ -419,27 +396,6 @@ pub trait DavMetaData: Debug + BoxCloneMd + Send + Sync {
     // Is empty file
     fn is_empty(&self) -> bool {
         self.len() == 0
-    }
-}
-
-// generic Clone, calls implementation-specific box_clone().
-impl Clone for Box<dyn DavMetaData> {
-    fn clone(&self) -> Box<dyn DavMetaData> {
-        self.box_clone()
-    }
-}
-
-// BoxCloneMd trait.
-#[doc(hidden)]
-pub trait BoxCloneMd {
-    fn box_clone(&self) -> Box<dyn DavMetaData>;
-}
-
-// implementation-specific clone.
-#[doc(hidden)]
-impl<MD: Clone + DavMetaData + 'static> BoxCloneMd for MD {
-    fn box_clone(&self) -> Box<dyn DavMetaData> {
-        Box::new((*self).clone())
     }
 }
 

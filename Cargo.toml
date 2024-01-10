@@ -27,11 +27,19 @@ memfs = ["libc"]
 
 [[example]]
 name = "actix"
-required-features = [ "actix-compat" ]
+required-features = [ "actix-compat", "default" ]
+
+[[example]]
+name = "hyper"
+required-features = [ "default" ]
+
+[[example]]
+name = "litmus"
+required-features = [ "default" ]
 
 [[example]]
 name = "warp"
-required-features = [ "warp-compat" ]
+required-features = [ "warp-compat", "default" ]
 
 [dependencies]
 bytes = "1.0.1"

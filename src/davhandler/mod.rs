@@ -16,8 +16,6 @@ use http_body::Body as HttpBody;
 use crate::body::{Body, StreamBody};
 use crate::davheaders;
 use crate::davpath::DavPath;
-use crate::fs::localfs::LocalFs;
-use crate::fs::memfs::MemFs;
 use crate::ls::fakels::FakeLs;
 use crate::ls::memls::MemLs;
 use crate::util::{dav_method, DavMethod, DavMethodSet};
@@ -40,60 +38,49 @@ pub mod handle_put;
 /// Configuration of the handler.
 #[derive(Clone)]
 pub struct DavBuilder {
-    // Prefix to be stripped off when handling request.
+    /// Prefix to be stripped off when handling request.
     prefix: String,
-    // Filesystem backend.
+    /// Filesystem backend.
     fs: FileSystem,
-    // Locksystem backend.
+    /// Locksystem backend.
     ls: Option<LockSystem>,
-    // Set of allowed methods (Defaults to "all methods")
+    /// Set of allowed methods (Defaults to "all methods")
     allow: DavMethodSet,
-    // Principal is webdav speak for "user", used to give locks an owner (if a locksystem is
-    // active).
+    /// Principal is webdav speak for "user", used to give locks an owner (if a locksystem is
+    /// active).
     principal: Option<String>,
-    // Hide symbolic links? Defaults to `true`.
+    /// Hide symbolic links? Defaults to `true`.
     hide_symlinks: bool,
-    // Does GET on a directory return indexes.
+    /// Does GET on a directory return indexes.
     autoindex: Option<bool>,
-    // read buffer size in bytes
+    /// read buffer size in bytes
     read_buf_size: usize,
-    // Does GET on a file return 302 redirect.
+    /// Does GET on a file return 302 redirect.
     redirect: bool,
 }
 
-impl Default for DavBuilder {
-    fn default() -> Self {
-        DavBuilder {
-            prefix: String::new(),
-            fs: FileSystem::default(),
-            ls: None,
-            allow: DavMethodSet::all(),
-            principal: None,
-            hide_symlinks: true,
-            autoindex: None,
-            read_buf_size: READ_BUF_SIZE,
-            redirect: false,
-        }
-    }
-}
-
-#[derive(Default, Clone)]
+/// File system backend.
+#[derive(Clone)]
 pub enum FileSystem {
-    #[default]
+    #[cfg(any(docsrs, feature = "memfs"))]
     Mem,
+    #[cfg(any(docsrs, feature = "localfs"))]
     Local {
+        /// Path to the root directory.
         base: PathBuf,
         public: bool,
+        /// Case insensitive file names (Windows)
         case_insensitive: bool,
+        /// Macos specific hacks
         macos: bool,
     },
-    LocalFile {
-        file: PathBuf,
-        public: bool,
-    },
+    #[cfg(any(docsrs, feature = "localfs"))]
+    LocalFile { file: PathBuf, public: bool },
 }
 
 impl FileSystem {
+    /// Serve a local directory
+    #[cfg(any(docsrs, feature = "localfs"))]
     pub fn local(
         path: impl Into<PathBuf>,
         public: bool,
@@ -107,6 +94,8 @@ impl FileSystem {
             macos,
         }
     }
+    /// Serve a local file
+    #[cfg(any(docsrs, feature = "localfs"))]
     pub fn local_file(file: impl Into<PathBuf>, public: bool) -> Self {
         FileSystem::LocalFile {
             file: file.into(),
@@ -115,14 +104,20 @@ impl FileSystem {
     }
     fn build(self) -> Arc<dyn DavFileSystem> {
         match self {
-            FileSystem::Mem => MemFs::new(),
+            #[cfg(any(docsrs, feature = "memfs"))]
+            FileSystem::Mem => crate::fs::memfs::MemFs::new(),
+            #[cfg(any(docsrs, feature = "localfs"))]
             FileSystem::Local {
                 base: path,
                 public,
                 case_insensitive,
                 macos,
-            } => LocalFs::new(path, public, case_insensitive, macos),
-            FileSystem::LocalFile { file, public } => LocalFs::new_file(file, public),
+            } => crate::fs::localfs::LocalFs::new(path, public, case_insensitive, macos),
+
+            #[cfg(any(docsrs, feature = "localfs"))]
+            FileSystem::LocalFile { file, public } => {
+                crate::fs::localfs::LocalFs::new_file(file, public)
+            }
         }
     }
 }
@@ -145,8 +140,18 @@ impl LockSystem {
 
 impl DavBuilder {
     /// Create a new configuration builder.
-    pub fn new() -> DavBuilder {
-        DavBuilder::default()
+    pub fn new(fs: FileSystem) -> DavBuilder {
+        Self {
+            prefix: String::new(),
+            fs,
+            ls: None,
+            allow: DavMethodSet::all(),
+            principal: None,
+            hide_symlinks: true,
+            autoindex: None,
+            read_buf_size: READ_BUF_SIZE,
+            redirect: false,
+        }
     }
 
     /// Use the configuration that was built to generate a DavConfig.
@@ -159,13 +164,6 @@ impl DavBuilder {
     pub fn strip_prefix(self, prefix: impl Into<String>) -> Self {
         let mut this = self;
         this.prefix = prefix.into();
-        this
-    }
-
-    /// Set the filesystem to use.
-    pub fn filesystem(self, fs: FileSystem) -> Self {
-        let mut this = self;
-        this.fs = fs;
         this
     }
 
@@ -252,16 +250,10 @@ impl From<DavBuilder> for DavHandler {
     }
 }
 
-impl From<&DavBuilder> for DavHandler {
-    fn from(cfg: &DavBuilder) -> Self {
-        Self::from(cfg.clone())
-    }
-}
-
 impl DavHandler {
     /// Return a configuration builder.
-    pub fn builder() -> DavBuilder {
-        DavBuilder::new()
+    pub fn builder(fs: FileSystem) -> DavBuilder {
+        DavBuilder::new(fs)
     }
 
     /// Handle a webdav request.

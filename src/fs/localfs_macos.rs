@@ -21,9 +21,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use lru::LruCache;
 use parking_lot::Mutex;
 
+use super::localfs::LocalFs;
 use crate::davpath::DavPath;
 use crate::fs::*;
-use super::localfs::LocalFs;
 
 const DU_CACHE_ENTRIES: usize = 4096;
 const DU_CACHE_MAX_AGE: u64 = 60;
@@ -249,11 +249,11 @@ impl LocalFs {
             return None;
         }
         match path.as_bytes() {
-            b"/.metadata_never_index" => {}
-            b"/.ql_disablethumbnails" => {}
-            _ => return None,
+            b"/.metadata_never_index" | b"/.ql_disablethumbnails" => {
+                Some(Box::new(EmptyMetaData {}))
+            }
+            _ => None,
         }
-        Some(Box::new(EmptyMetaData {}))
     }
 
     // This file can never exist.
@@ -263,11 +263,9 @@ impl LocalFs {
             return false;
         }
         match path.as_bytes() {
-            b"/.metadata_never_index" => return true,
-            b"/.ql_disablethumbnails" => return true,
-            _ => {}
+            b"/.metadata_never_index" | b"/.ql_disablethumbnails" => true,
+            _ => path.file_name_bytes() == b".localized",
         }
-        path.file_name_bytes() == b".localized"
     }
 
     // File might not exists because of negative cache entry.

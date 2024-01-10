@@ -15,9 +15,8 @@ use std::os::unix::{
 };
 #[cfg(target_os = "windows")]
 use std::os::windows::prelude::*;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -27,57 +26,9 @@ use futures_util::{future, future::BoxFuture, FutureExt, Stream};
 use pin_utils::pin_mut;
 use tokio::task;
 
+use super::localfs_macos::DUCacheBuilder;
 use crate::davpath::DavPath;
 use crate::fs::*;
-use super::localfs_macos::DUCacheBuilder;
-
-const RUNTIME_TYPE_BASIC: u32 = 1;
-const RUNTIME_TYPE_THREADPOOL: u32 = 2;
-static RUNTIME_TYPE: AtomicU32 = AtomicU32::new(0);
-
-#[derive(Clone, Copy)]
-#[repr(u32)]
-enum RuntimeType {
-    Basic = RUNTIME_TYPE_BASIC,
-    ThreadPool = RUNTIME_TYPE_THREADPOOL,
-}
-
-impl RuntimeType {
-    #[inline]
-    fn get() -> RuntimeType {
-        match RUNTIME_TYPE.load(Ordering::Relaxed) {
-            RUNTIME_TYPE_BASIC => RuntimeType::Basic,
-            RUNTIME_TYPE_THREADPOOL => RuntimeType::ThreadPool,
-            _ => {
-                let dbg = format!("{:?}", tokio::runtime::Handle::current());
-                let rt = if dbg.contains("ThreadPool") {
-                    RuntimeType::ThreadPool
-                } else {
-                    RuntimeType::Basic
-                };
-                RUNTIME_TYPE.store(rt as u32, Ordering::SeqCst);
-                rt
-            }
-        }
-    }
-}
-
-// Run some code via block_in_place() or spawn_blocking().
-//
-// There's also a method on LocalFs for this, use the freestanding
-// function if you do not want the fs_access_guard() closure to be used.
-#[inline]
-async fn blocking<F, R>(func: F) -> R
-where
-    F: FnOnce() -> R,
-    F: Send + 'static,
-    R: Send + 'static,
-{
-    match RuntimeType::get() {
-        RuntimeType::Basic => task::spawn_blocking(func).await.unwrap(),
-        RuntimeType::ThreadPool => task::block_in_place(func),
-    }
-}
 
 #[derive(Debug, Clone)]
 struct LocalFsMetaData(std::fs::Metadata);
@@ -111,16 +62,9 @@ struct LocalFsReadDir {
     fut: Option<BoxFuture<'static, ReadDirBatch>>,
 }
 
-// a DirEntry either already has the metadata available, or a handle
-// to the filesystem so it can call fs.blocking()
-enum Meta {
-    Data(io::Result<std::fs::Metadata>),
-    Fs(LocalFs),
-}
-
 // Items from the readdir stream.
 struct LocalFsDirEntry {
-    meta: Meta,
+    meta: io::Result<std::fs::Metadata>,
     entry: std::fs::DirEntry,
 }
 
@@ -133,14 +77,9 @@ impl LocalFs {
     ///
     /// If "case_insensitive" is set to true, all filesystem lookups will
     /// be case insensitive. Note that this has a _lot_ of overhead!
-    pub fn new<P: AsRef<Path>>(
-        base: P,
-        public: bool,
-        case_insensitive: bool,
-        macos: bool,
-    ) -> Arc<LocalFs> {
+    pub fn new(base: PathBuf, public: bool, case_insensitive: bool, macos: bool) -> Arc<LocalFs> {
         let inner = LocalFsInner {
-            basedir: base.as_ref().to_path_buf(),
+            basedir: base,
             public,
             macos,
             case_insensitive,
@@ -158,9 +97,9 @@ impl LocalFs {
     ///
     /// This is like `new()`, but it always serves this single file.
     /// The request path is ignored.
-    pub fn new_file<P: AsRef<Path>>(file: P, public: bool) -> Arc<LocalFs> {
+    pub fn new_file(file: PathBuf, public: bool) -> Arc<LocalFs> {
         let inner = LocalFsInner {
-            basedir: file.as_ref().to_path_buf(),
+            basedir: file,
             public,
             macos: false,
             case_insensitive: false,
@@ -202,11 +141,12 @@ impl LocalFs {
         R: Send + 'static,
     {
         let this = self.clone();
-        blocking(move || {
+        task::spawn_blocking(move || {
             let _guard = this.inner.fs_access_guard.as_ref().map(|f| f());
             func()
         })
         .await
+        .unwrap()
     }
 }
 
@@ -461,16 +401,14 @@ fn read_batch(
         }
     };
     let _guard = match do_meta {
-        ReadDirMeta::None => None,
         _ => fs.inner.fs_access_guard.as_ref().map(|f| f()),
     };
     for _ in 0..256 {
         match iterator.next() {
             Some(Ok(entry)) => {
                 let meta = match do_meta {
-                    ReadDirMeta::Data => Meta::Data(std::fs::metadata(entry.path())),
-                    ReadDirMeta::DataSymlink => Meta::Data(entry.metadata()),
-                    ReadDirMeta::None => Meta::Fs(fs.clone()),
+                    ReadDirMeta::Data => std::fs::metadata(entry.path()),
+                    ReadDirMeta::DataSymlink => entry.metadata(),
                 };
                 let d = LocalFsDirEntry { meta, entry };
                 buffer.push_back(Ok(d))
@@ -498,9 +436,12 @@ impl LocalFsReadDir {
         let fs = self.fs.clone();
         let do_meta = self.do_meta;
 
-        let fut: BoxFuture<ReadDirBatch> =
-            blocking(move || read_batch(iterator, fs, do_meta)).boxed();
-        fut
+        async move {
+            task::spawn_blocking(move || read_batch(iterator, fs, do_meta))
+                .await
+                .unwrap()
+        }
+        .boxed()
     }
 }
 
@@ -567,47 +508,23 @@ enum Is {
 impl LocalFsDirEntry {
     async fn is_a(&self, is: Is) -> FsResult<bool> {
         match &self.meta {
-            Meta::Data(Ok(meta)) => Ok(match is {
+            Ok(meta) => Ok(match is {
                 Is::File => meta.file_type().is_file(),
                 Is::Dir => meta.file_type().is_dir(),
                 Is::Symlink => meta.file_type().is_symlink(),
             }),
-            Meta::Data(Err(e)) => Err(e.into()),
-            Meta::Fs(fs) => {
-                let fullpath = self.entry.path();
-                let ft = fs
-                    .blocking(move || std::fs::metadata(fullpath))
-                    .await?
-                    .file_type();
-                Ok(match is {
-                    Is::File => ft.is_file(),
-                    Is::Dir => ft.is_dir(),
-                    Is::Symlink => ft.is_symlink(),
-                })
-            }
+            Err(e) => Err(e.into()),
         }
     }
 }
 
 impl DavDirEntry for LocalFsDirEntry {
     fn metadata(&self) -> FsFuture<Box<dyn DavMetaData>> {
-        match &self.meta {
-            Meta::Data(meta) => {
-                let m = match meta {
-                    Ok(meta) => Ok(Box::new(LocalFsMetaData(meta.clone())) as Box<dyn DavMetaData>),
-                    Err(e) => Err(e.into()),
-                };
-                Box::pin(future::ready(m))
-            }
-            Meta::Fs(fs) => {
-                let fullpath = self.entry.path();
-                fs.blocking(move || match std::fs::metadata(fullpath) {
-                    Ok(meta) => Ok(Box::new(LocalFsMetaData(meta)) as Box<dyn DavMetaData>),
-                    Err(e) => Err(e.into()),
-                })
-                .boxed()
-            }
-        }
+        let m = match &self.meta {
+            Ok(meta) => Ok(Box::new(LocalFsMetaData(meta.clone())) as _),
+            Err(e) => Err(e.into()),
+        };
+        Box::pin(future::ready(m))
     }
 
     #[cfg(unix)]
@@ -637,7 +554,9 @@ impl DavFile for LocalFsFile {
     fn metadata(&mut self) -> FsFuture<Box<dyn DavMetaData>> {
         async move {
             let file = self.0.take().unwrap();
-            let (meta, file) = blocking(move || (file.metadata(), file)).await;
+            let (meta, file) = task::spawn_blocking(move || (file.metadata(), file))
+                .await
+                .unwrap();
             self.0 = Some(file);
             Ok(Box::new(LocalFsMetaData(meta?)) as Box<dyn DavMetaData>)
         }
@@ -647,7 +566,9 @@ impl DavFile for LocalFsFile {
     fn write_bytes(&mut self, buf: Bytes) -> FsFuture<()> {
         async move {
             let mut file = self.0.take().unwrap();
-            let (res, file) = blocking(move || (file.write_all(&buf), file)).await;
+            let (res, file) = task::spawn_blocking(move || (file.write_all(&buf), file))
+                .await
+                .unwrap();
             self.0 = Some(file);
             res.map_err(|e| e.into())
         }
@@ -657,7 +578,7 @@ impl DavFile for LocalFsFile {
     fn write_buf(&mut self, mut buf: Box<dyn Buf + Send>) -> FsFuture<()> {
         async move {
             let mut file = self.0.take().unwrap();
-            let (res, file) = blocking(move || {
+            let (res, file) = task::spawn_blocking(move || {
                 while buf.remaining() > 0 {
                     let n = match file.write(buf.chunk()) {
                         Ok(n) => n,
@@ -667,7 +588,8 @@ impl DavFile for LocalFsFile {
                 }
                 (Ok(()), file)
             })
-            .await;
+            .await
+            .unwrap();
             self.0 = Some(file);
             res.map_err(|e| e.into())
         }
@@ -677,7 +599,7 @@ impl DavFile for LocalFsFile {
     fn read_bytes(&mut self, count: usize) -> FsFuture<Bytes> {
         async move {
             let mut file = self.0.take().unwrap();
-            let (res, file) = blocking(move || {
+            let (res, file) = task::spawn_blocking(move || {
                 let mut buf = BytesMut::with_capacity(count);
                 let res = unsafe {
                     buf.set_len(count);
@@ -688,7 +610,8 @@ impl DavFile for LocalFsFile {
                 };
                 (res, file)
             })
-            .await;
+            .await
+            .unwrap();
             self.0 = Some(file);
             res.map_err(|e| e.into())
         }
@@ -698,7 +621,9 @@ impl DavFile for LocalFsFile {
     fn seek(&mut self, pos: SeekFrom) -> FsFuture<u64> {
         async move {
             let mut file = self.0.take().unwrap();
-            let (res, file) = blocking(move || (file.seek(pos), file)).await;
+            let (res, file) = task::spawn_blocking(move || (file.seek(pos), file))
+                .await
+                .unwrap();
             self.0 = Some(file);
             res.map_err(|e| e.into())
         }
@@ -708,7 +633,9 @@ impl DavFile for LocalFsFile {
     fn flush(&mut self) -> FsFuture<()> {
         async move {
             let mut file = self.0.take().unwrap();
-            let (res, file) = blocking(move || (file.flush(), file)).await;
+            let (res, file) = task::spawn_blocking(move || (file.flush(), file))
+                .await
+                .unwrap();
             self.0 = Some(file);
             res.map_err(|e| e.into())
         }

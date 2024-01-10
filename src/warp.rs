@@ -5,8 +5,7 @@
 //! filter will return a 404 reply, and not an internal
 //! rejection.
 //!
-use std::convert::Infallible;
-use std::path::Path;
+use std::{convert::Infallible, path::PathBuf};
 
 use crate::{DavHandler, FileSystem, LockSystem};
 use warp::{filters::BoxedFilter, Filter, Reply};
@@ -78,14 +77,13 @@ pub fn dav_handler(handler: DavHandler) -> BoxedFilter<(impl Reply,)> {
 ///   the developers to this current limitation, so they don't accidentally expect
 ///   `auto_index_over_get` to control WebDAV.
 /// - no flags set: 404.
-pub fn dav_dir(base: impl AsRef<Path>, auto_index_over_get: bool) -> BoxedFilter<(impl Reply,)> {
+pub fn dav_dir(base: impl Into<PathBuf>, auto_index_over_get: bool) -> BoxedFilter<(impl Reply,)> {
     debug_assert!(
         auto_index_over_get,
         "See documentation of dav_server::warp::dav_dir(...)."
     );
     dav_handler(
-        DavHandler::builder()
-            .filesystem(FileSystem::local(base.as_ref(), false, false, false))
+        DavHandler::builder(FileSystem::local(base, false, false, false))
             .locksystem(LockSystem::Fake)
             .autoindex(auto_index_over_get)
             .build(),
@@ -94,10 +92,9 @@ pub fn dav_dir(base: impl AsRef<Path>, auto_index_over_get: bool) -> BoxedFilter
 
 /// Creates a Filter that serves a single file, ignoring the request path,
 /// like `warp::filters::fs::file`.
-pub fn dav_file(file: impl AsRef<Path>) -> BoxedFilter<(impl Reply,)> {
+pub fn dav_file(file: impl Into<PathBuf>) -> BoxedFilter<(impl Reply,)> {
     dav_handler(
-        DavHandler::builder()
-            .filesystem(FileSystem::local_file(file.as_ref(), false))
+        DavHandler::builder(FileSystem::local_file(file, false))
             .locksystem(LockSystem::Fake)
             .build(),
     )

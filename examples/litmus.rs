@@ -24,12 +24,11 @@ struct Server {
 
 impl Server {
     pub fn new(directory: String, memls: bool, fakels: bool, auth: bool) -> Self {
-        let mut config = DavHandler::builder();
-        if !directory.is_empty() {
-            config = config.filesystem(FileSystem::local(directory, true, true, true));
+        let mut config = DavHandler::builder(if !directory.is_empty() {
+            FileSystem::local(directory, true, true, true)
         } else {
-            config = config.filesystem(FileSystem::Mem);
-        };
+            FileSystem::Mem
+        });
         if fakels {
             config = config.locksystem(LockSystem::Fake);
         }
@@ -100,17 +99,33 @@ struct Cli {
 async fn main() -> Result<(), Box<dyn Error>> {
     env_logger::init();
 
-    let args = Cli::parse();
+    let Cli {
+        port,
+        dir,
+        memfs,
+        memls,
+        fakels,
+        auth,
+    } = Cli::parse();
+    serve(dir, memfs, memls, fakels, auth, port).await
+}
 
-    let (dir, name) = match args.dir.as_ref() {
+async fn serve(
+    dir: Option<String>,
+    memfs: bool,
+    memls: bool,
+    fakels: bool,
+    auth: bool,
+    port: u16,
+) -> Result<(), Box<dyn Error>> {
+    let (dir, name) = match dir.as_ref() {
         Some(dir) => (dir.as_str(), dir.as_str()),
         None => ("", "memory filesystem"),
     };
-    let auth = args.auth;
-    let memls = args.memfs || args.memls;
-    let fakels = args.fakels;
+    let memls = memfs || memls;
+    let fakels = fakels;
 
-    let dav_server = Server::new(dir.to_string(), memls, fakels, auth);
+    let dav_server = Server::new(dir.into(), memls, fakels, auth);
     let make_service = hyper::service::make_service_fn(|_| {
         let dav_server = dav_server.clone();
         async move {
@@ -122,7 +137,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     });
 
-    let port = args.port;
+    let port = port;
     let addr = format!("0.0.0.0:{}", port);
     let addr = SocketAddr::from_str(&addr)?;
 
@@ -133,4 +148,69 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("Serving {} on {}", name, port);
     let _ = server.await;
     Ok(())
+}
+
+mod test {
+
+    #[cfg(target_family = "unix")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn litmus_suite() {
+        use std::env::current_dir;
+        use std::process::Command;
+
+        let server = tokio::spawn(async move {
+            super::serve(None, true, false, false, true, 4918)
+                .await
+                .unwrap();
+        });
+
+        let litmus_dir = current_dir().unwrap().join("litmus-0.13");
+        println!("{litmus_dir:?}");
+
+        if !litmus_dir.exists() {
+            let status = Command::new("curl")
+                .arg("-O")
+                .arg("http://www.webdav.org/neon/litmus/litmus-0.13.tar.gz")
+                .status()
+                .expect("curl failed");
+            assert!(status.success());
+
+            let status = Command::new("tar")
+                .arg("xf")
+                .arg("litmus-0.13.tar.gz")
+                .status()
+                .expect("tar failed");
+            assert!(status.success());
+            let archive = current_dir().unwrap().join("litmus-0.13.tar.gz");
+            std::fs::remove_file(archive).unwrap();
+
+            assert!(litmus_dir.exists());
+            let status = Command::new("./configure")
+                .current_dir(&litmus_dir)
+                .status()
+                .expect("configure failed");
+            assert!(status.success());
+
+            let status = Command::new("make")
+                .current_dir(&litmus_dir)
+                .status()
+                .expect("make failed");
+            assert!(status.success());
+        }
+
+        let status = Command::new("./litmus")
+            .current_dir(litmus_dir)
+            .env("TESTS", "http basic copymove locks props")
+            .env("HTDOCS", "htdocs")
+            .env("TESTROOT", ".")
+            .arg("http://localhost:4918/")
+            .arg("someuser")
+            .arg("somepass")
+            .status()
+            .expect("litmus failed");
+
+        assert!(status.success());
+
+        server.abort();
+    }
 }

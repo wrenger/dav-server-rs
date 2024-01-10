@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::io::{self, Cursor};
+use std::sync::Arc;
 
 use futures_util::{future::BoxFuture, FutureExt, StreamExt};
 use headers::HeaderMapExt;
@@ -100,8 +101,8 @@ struct PropWriter {
     tx: Option<Sender>,
     name: String,
     props: Vec<Element>,
-    fs: Box<dyn DavFileSystem>,
-    ls: Option<Box<dyn DavLockSystem>>,
+    fs: Arc<dyn DavFileSystem>,
+    ls: Option<Arc<dyn DavLockSystem>>,
     useragent: String,
     q_cache: QuotaCache,
 }
@@ -199,7 +200,7 @@ impl DavHandler {
 
         trace!("propfind: type request: {}", name);
 
-        let mut pw = PropWriter::new(req, &mut res, name, props, &*self.fs, self.ls.as_deref())?;
+        let mut pw = PropWriter::new(req, &mut res, name, props, self.fs.clone(), self.ls.clone())?;
 
         let this = self.clone();
         *res.body_mut() = Body::from(AsyncStream::new(|tx| async move {
@@ -471,7 +472,7 @@ impl DavHandler {
         }
 
         // And reply.
-        let mut pw = PropWriter::new(req, &mut res, "propertyupdate", Vec::new(), &*self.fs, None)?;
+        let mut pw = PropWriter::new(req, &mut res, "propertyupdate", Vec::new(), self.fs.clone(), None)?;
         *res.body_mut() = Body::from(AsyncStream::new(|tx| async move {
             pw.set_tx(tx);
             pw.write_propresponse(&path, hm)?;
@@ -489,8 +490,8 @@ impl PropWriter {
         res: &mut Response<Body>,
         name: &str,
         mut props: Vec<Element>,
-        fs: &dyn DavFileSystem,
-        ls: Option<&dyn DavLockSystem>,
+        fs: Arc<dyn DavFileSystem>,
+        ls: Option<Arc<dyn DavLockSystem>>,
     ) -> DavResult<PropWriter> {
         let contenttype = "application/xml; charset=utf-8".parse().unwrap();
         res.headers_mut().insert("content-type", contenttype);
@@ -566,8 +567,8 @@ impl PropWriter {
             tx: None,
             name: name.to_string(),
             props,
-            fs: fs.box_clone(),
-            ls: ls.map(|ls| ls.box_clone()),
+            fs: fs.clone(),
+            ls: ls.clone(),
             useragent: ua.to_string(),
             q_cache: Default::default(),
         })

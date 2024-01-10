@@ -77,8 +77,7 @@
 //!     let dir = "/tmp";
 //!     let addr = ([127, 0, 0, 1], 4918).into();
 //!
-//!     let dav_server = DavHandler::builder()
-//!         .filesystem(FileSystem::local(dir, false, false, false))
+//!     let dav_server = DavHandler::builder(FileSystem::local(dir, false, false, false))
 //!         .locksystem(LockSystem::Fake)
 //!         .build();
 //!

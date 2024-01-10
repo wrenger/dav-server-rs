@@ -21,8 +21,8 @@ use crate::tree;
 type Tree = tree::Tree<Vec<u8>, Vec<DavLock>>;
 
 /// Ephemeral in-memory LockSystem.
-#[derive(Debug, Clone)]
-pub struct MemLs(Arc<Mutex<MemLsInner>>);
+#[derive(Debug)]
+pub struct MemLs(Mutex<MemLsInner>);
 
 #[derive(Debug)]
 struct MemLsInner {
@@ -38,7 +38,7 @@ impl MemLs {
             tree: Tree::new(Vec::new()),
             locks: HashMap::new(),
         };
-        Arc::new(MemLs(Arc::new(Mutex::new(inner))))
+        Arc::new(MemLs(Mutex::new(inner)))
     }
 }
 

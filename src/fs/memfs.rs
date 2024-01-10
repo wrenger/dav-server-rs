@@ -22,7 +22,7 @@ use crate::davpath::DavPath;
 use crate::fs::*;
 use crate::tree;
 
-type Tree = tree::Tree<Vec<u8>, MemFsNode>;
+type Tree = tree::Tree<Vec<u8>, Node>;
 
 /// Ephemeral in-memory filesystem.
 #[derive(Debug)]
@@ -31,20 +31,20 @@ pub struct MemFs {
 }
 
 #[derive(Debug, Clone)]
-enum MemFsNode {
-    Dir(MemFsDirNode),
-    File(MemFsFileNode),
+enum Node {
+    Dir(DirNode),
+    File(FileNode),
 }
 
 #[derive(Debug, Clone)]
-struct MemFsDirNode {
+struct DirNode {
     props: HashMap<String, DavProp>,
     mtime: SystemTime,
     crtime: SystemTime,
 }
 
 #[derive(Debug, Clone)]
-struct MemFsFileNode {
+struct FileNode {
     props: HashMap<String, DavProp>,
     mtime: SystemTime,
     crtime: SystemTime,
@@ -52,7 +52,7 @@ struct MemFsFileNode {
 }
 
 #[derive(Debug, Clone)]
-struct MemFsDirEntry {
+struct DirEntry {
     mtime: SystemTime,
     crtime: SystemTime,
     is_dir: bool,
@@ -71,7 +71,7 @@ struct MemFsFile {
 impl MemFs {
     /// Create a new "memfs" filesystem.
     pub fn new() -> Arc<MemFs> {
-        let root = MemFsNode::new_dir();
+        let root = Node::new_dir();
         Arc::new(MemFs {
             tree: Arc::new(Mutex::new(Tree::new(root))),
         })
@@ -95,7 +95,7 @@ impl MemFs {
                     return Err(FsError::NotFound);
                 }
                 let parent_id = tree.lookup_parent(path)?;
-                tree.add_child(parent_id, file_name(path), MemFsNode::new_file(), true)?
+                tree.add_child(parent_id, file_name(path), Node::new_file(), true)?
             }
             Err(e) => return Err(e),
         };
@@ -172,7 +172,7 @@ impl DavFileSystem for MemFs {
             let tree = &mut *self.tree.lock().unwrap();
             let path = path.as_bytes();
             let parent_id = tree.lookup_parent(path)?;
-            tree.add_child(parent_id, file_name(path), MemFsNode::new_dir(), false)?;
+            tree.add_child(parent_id, file_name(path), Node::new_dir(), false)?;
             tree.get_node_mut(parent_id)?
                 .update_mtime(SystemTime::now());
             Ok(())
@@ -238,9 +238,9 @@ impl DavFileSystem for MemFs {
 
             // copy.
             let mut data = (*tree.get_node_mut(snode_id)?).clone();
-            match data {
-                MemFsNode::Dir(ref mut d) => d.crtime = SystemTime::now(),
-                MemFsNode::File(ref mut f) => f.crtime = SystemTime::now(),
+            match &mut data {
+                Node::Dir(d) => d.crtime = SystemTime::now(),
+                Node::File(f) => f.crtime = SystemTime::now(),
             }
             *tree.get_node_mut(dnode_id)? = data;
 
@@ -330,10 +330,9 @@ fn cloneprop(p: &DavProp) -> DavProp {
     }
 }
 
-impl DavDirEntry for MemFsDirEntry {
+impl DavDirEntry for DirEntry {
     fn metadata(&self) -> FsFuture<Box<dyn DavMetaData>> {
-        let meta = (*self).clone();
-        Box::pin(future::ok(Box::new(meta) as Box<dyn DavMetaData>))
+        Box::pin(future::ok(Box::new(self.clone()) as Box<dyn DavMetaData>))
     }
 
     fn name(&self) -> Vec<u8> {
@@ -449,7 +448,7 @@ impl DavFile for MemFsFile {
     }
 }
 
-impl DavMetaData for MemFsDirEntry {
+impl DavMetaData for DirEntry {
     fn len(&self) -> u64 {
         self.size
     }
@@ -467,17 +466,17 @@ impl DavMetaData for MemFsDirEntry {
     }
 }
 
-impl MemFsNode {
-    fn new_dir() -> MemFsNode {
-        MemFsNode::Dir(MemFsDirNode {
+impl Node {
+    fn new_dir() -> Node {
+        Node::Dir(DirNode {
             crtime: SystemTime::now(),
             mtime: SystemTime::now(),
             props: HashMap::new(),
         })
     }
 
-    fn new_file() -> MemFsNode {
-        MemFsNode::File(MemFsFileNode {
+    fn new_file() -> Node {
+        Node::File(FileNode {
             crtime: SystemTime::now(),
             mtime: SystemTime::now(),
             props: HashMap::new(),
@@ -486,12 +485,12 @@ impl MemFsNode {
     }
 
     // helper to create MemFsDirEntry from a node.
-    fn as_dirent(&self, name: &[u8]) -> MemFsDirEntry {
+    fn as_dirent(&self, name: &[u8]) -> DirEntry {
         let (is_dir, size, mtime, crtime) = match *self {
-            MemFsNode::File(ref file) => (false, file.data.len() as u64, file.mtime, file.crtime),
-            MemFsNode::Dir(ref dir) => (true, 0, dir.mtime, dir.crtime),
+            Node::File(ref file) => (false, file.data.len() as u64, file.mtime, file.crtime),
+            Node::Dir(ref dir) => (true, 0, dir.mtime, dir.crtime),
         };
-        MemFsDirEntry {
+        DirEntry {
             name: name.to_vec(),
             mtime,
             crtime,
@@ -502,43 +501,43 @@ impl MemFsNode {
 
     fn update_mtime(&mut self, tm: std::time::SystemTime) {
         match *self {
-            MemFsNode::Dir(ref mut d) => d.mtime = tm,
-            MemFsNode::File(ref mut f) => f.mtime = tm,
+            Node::Dir(ref mut d) => d.mtime = tm,
+            Node::File(ref mut f) => f.mtime = tm,
         }
     }
 
     fn is_dir(&self) -> bool {
         match *self {
-            MemFsNode::Dir(_) => true,
-            MemFsNode::File(_) => false,
+            Node::Dir(_) => true,
+            Node::File(_) => false,
         }
     }
 
-    fn as_file(&self) -> FsResult<&MemFsFileNode> {
+    fn as_file(&self) -> FsResult<&FileNode> {
         match *self {
-            MemFsNode::File(ref n) => Ok(n),
+            Node::File(ref n) => Ok(n),
             _ => Err(FsError::Forbidden),
         }
     }
 
-    fn as_file_mut(&mut self) -> FsResult<&mut MemFsFileNode> {
+    fn as_file_mut(&mut self) -> FsResult<&mut FileNode> {
         match *self {
-            MemFsNode::File(ref mut n) => Ok(n),
+            Node::File(ref mut n) => Ok(n),
             _ => Err(FsError::Forbidden),
         }
     }
 
     fn get_props(&self) -> &HashMap<String, DavProp> {
         match *self {
-            MemFsNode::File(ref n) => &n.props,
-            MemFsNode::Dir(ref d) => &d.props,
+            Node::File(ref n) => &n.props,
+            Node::Dir(ref d) => &d.props,
         }
     }
 
     fn get_props_mut(&mut self) -> &mut HashMap<String, DavProp> {
         match *self {
-            MemFsNode::File(ref mut n) => &mut n.props,
-            MemFsNode::Dir(ref mut d) => &mut d.props,
+            Node::File(ref mut n) => &mut n.props,
+            Node::Dir(ref mut d) => &mut d.props,
         }
     }
 }
