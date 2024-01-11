@@ -150,7 +150,11 @@ pub enum ReadDirMeta {
 /// The trait that defines a filesystem.
 pub trait DavFileSystem: Sync + Send {
     /// Open a file.
-    fn open<'a>(&'a self, path: &'a DavPath, options: OpenOptions) -> FsFuture<'a, Box<dyn DavFile>>;
+    fn open<'a>(
+        &'a self,
+        path: &'a DavPath,
+        options: OpenOptions,
+    ) -> FsFuture<'a, Box<dyn DavFile>>;
 
     /// Perform read_dir.
     fn read_dir<'a>(
@@ -244,10 +248,7 @@ pub trait DavFileSystem: Sync + Send {
     ///
     /// The default implementation returns `false`.
     #[allow(unused_variables)]
-    fn have_props<'a>(
-        &'a self,
-        path: &'a DavPath,
-    ) -> BoxFuture<'a, bool> {
+    fn have_props<'a>(&'a self, path: &'a DavPath) -> BoxFuture<'a, bool> {
         Box::pin(future::ready(false))
     }
 

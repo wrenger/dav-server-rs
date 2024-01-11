@@ -870,9 +870,7 @@ impl PropWriter {
         self.q_cache = qc;
 
         // and list the dead properties as well.
-        if (self.name == "propname" || self.name == "allprop")
-            && self.fs.have_props(path).await
-        {
+        if (self.name == "propname" || self.name == "allprop") && self.fs.have_props(path).await {
             if let Ok(v) = self.fs.get_props(path, do_content).await {
                 v.into_iter()
                     .map(davprop_to_element)

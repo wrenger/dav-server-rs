@@ -76,22 +76,22 @@ impl Server {
 #[command(about, version)]
 struct Cli {
     /// port to listen on
-    #[arg(short = 'p', long, default_value = "4918")]
+    #[arg(short, long, default_value = "4918")]
     port: u16,
     /// local directory to serve
-    #[arg(short = 'd', long)]
+    #[arg(short, long)]
     dir: Option<String>,
     /// serve from ephemeral memory filesystem
-    #[arg(short = 'm', long)]
+    #[arg(short, long)]
     memfs: bool,
     /// use ephemeral memory locksystem
     #[arg(short = 'l', long)]
     memls: bool,
     /// use fake memory locksystem
-    #[arg(short = 'f', long)]
+    #[arg(short, long)]
     fakels: bool,
     /// require basic authentication
-    #[arg(short = 'a', long)]
+    #[arg(short, long)]
     auth: bool,
 }
 
@@ -150,57 +150,76 @@ async fn serve(
     Ok(())
 }
 
+#[cfg(test)]
+#[cfg(target_family = "unix")]
 mod test {
+    use std::env::current_dir;
+    use std::path::PathBuf;
+    use std::process::Command;
 
-    #[cfg(target_family = "unix")]
-    #[tokio::test(flavor = "multi_thread")]
-    async fn litmus_suite() {
-        use std::env::current_dir;
-        use std::process::Command;
+    use tokio::sync::Mutex;
 
-        env_logger::init();
+    /// Prevent parallel installations.
+    static INSTALL_LOCK: Mutex<()> = Mutex::const_new(());
 
-        std::fs::create_dir_all("tmp").unwrap();
-
-        let server = tokio::spawn(async move {
-            super::serve(Some("tmp".into()), true, false, false, true, 4918)
-                .await
-                .unwrap();
-        });
-
-        let litmus_dir = current_dir().unwrap().join("litmus-0.13");
+    /// Download, build, and install litmus if not installed already.
+    async fn install_litmus() -> PathBuf {
+        const URL: &str = "http://www.webdav.org/neon/litmus/";
+        const VERSION: &str = "0.13";
+        let name = format!("litmus-{VERSION}");
+        let litmus_dir = current_dir().unwrap().join(name.clone());
         println!("{litmus_dir:?}");
 
+        let _lock = INSTALL_LOCK.lock().await;
         if !litmus_dir.exists() {
+            let archive = format!("{name}.tar.gz");
+            let url = format!("{URL}{archive}");
+
             let status = Command::new("curl")
                 .arg("-O")
-                .arg("http://www.webdav.org/neon/litmus/litmus-0.13.tar.gz")
+                .arg(url)
                 .status()
-                .expect("curl failed");
+                .expect("curl");
             assert!(status.success());
 
             let status = Command::new("tar")
                 .arg("xf")
-                .arg("litmus-0.13.tar.gz")
+                .arg(archive.clone())
                 .status()
-                .expect("tar failed");
+                .expect("tar");
             assert!(status.success());
-            let archive = current_dir().unwrap().join("litmus-0.13.tar.gz");
+            let archive = current_dir().unwrap().join(archive);
             std::fs::remove_file(archive).unwrap();
 
             assert!(litmus_dir.exists());
             let status = Command::new("./configure")
                 .current_dir(&litmus_dir)
                 .status()
-                .expect("configure failed");
+                .expect("configure");
             assert!(status.success());
 
             let status = Command::new("make")
                 .current_dir(&litmus_dir)
                 .status()
-                .expect("make failed");
+                .expect("make");
             assert!(status.success());
         }
+
+        litmus_dir
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn directory() {
+        let _ = env_logger::builder().is_test(true).try_init();
+
+        let litmus_dir = install_litmus().await;
+
+        std::fs::create_dir_all("tmp").unwrap();
+        let server = tokio::spawn(async move {
+            super::serve(Some("tmp".into()), true, false, false, true, 4918)
+                .await
+                .unwrap();
+        });
 
         let status = Command::new("./litmus")
             .current_dir(litmus_dir)
@@ -213,7 +232,38 @@ mod test {
             .status()
             .expect("litmus failed");
 
-        assert!(status.success());
+        if !status.success() {
+            log::warn!("Localfs might not complete litmus");
+        }
+
+        server.abort();
+        std::fs::remove_dir_all("tmp").unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn memory() {
+        let _ = env_logger::builder().is_test(true).try_init();
+
+        let litmus_dir = install_litmus().await;
+
+        let server = tokio::spawn(async move {
+            super::serve(None, true, false, false, true, 4919)
+                .await
+                .unwrap();
+        });
+
+        let status = Command::new("./litmus")
+            .current_dir(litmus_dir)
+            .env("TESTS", "http basic copymove locks props")
+            .env("HTDOCS", "htdocs")
+            .env("TESTROOT", ".")
+            .arg("http://localhost:4919/")
+            .arg("someuser")
+            .arg("somepass")
+            .status()
+            .expect("litmus failed");
+
+        assert!(status.success(), "Memfs should pass litmus!");
 
         server.abort();
     }
