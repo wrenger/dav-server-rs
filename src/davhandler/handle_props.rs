@@ -203,7 +203,7 @@ impl DavHandler {
         let mut pw = PropWriter::new(req, &mut res, name, props, self.fs.clone(), self.ls.clone())?;
 
         let this = self.clone();
-        *res.body_mut() = Body::from(AsyncStream::new(|tx| async move {
+        *res.body_mut() = Body::stream(AsyncStream::new(|tx| async move {
             pw.set_tx(tx);
             let is_dir = meta.is_dir();
             pw.write_props(&path, meta).await?;
@@ -480,7 +480,7 @@ impl DavHandler {
             self.fs.clone(),
             None,
         )?;
-        *res.body_mut() = Body::from(AsyncStream::new(|tx| async move {
+        *res.body_mut() = Body::stream(AsyncStream::new(|tx| async move {
             pw.set_tx(tx);
             pw.write_propresponse(&path, hm)?;
             pw.close().await?;
@@ -674,17 +674,6 @@ impl PropWriter {
                             let tm = systemtime_to_rfc3339(time);
                             return self.build_elem(docontent, pfx, prop, tm);
                         }
-                        // use ctime instead - apache seems to do this.
-                        if let Ok(ctime) = meta.status_changed() {
-                            let mut time = ctime;
-                            if let Ok(mtime) = meta.modified() {
-                                if mtime < ctime {
-                                    time = mtime;
-                                }
-                            }
-                            let tm = systemtime_to_rfc3339(time);
-                            return self.build_elem(docontent, pfx, prop, tm);
-                        }
                     }
                     "displayname" | "getcontentlanguage" => {
                         try_deadprop = true;
@@ -769,17 +758,6 @@ impl PropWriter {
                 match prop.name.as_str() {
                     "Win32CreationTime" => {
                         if let Ok(time) = meta.created() {
-                            let tm = systemtime_to_httpdate(time);
-                            return self.build_elem(docontent, pfx, prop, tm);
-                        }
-                        // use ctime instead - apache seems to do this.
-                        if let Ok(ctime) = meta.status_changed() {
-                            let mut time = ctime;
-                            if let Ok(mtime) = meta.modified() {
-                                if mtime < ctime {
-                                    time = mtime;
-                                }
-                            }
                             let tm = systemtime_to_httpdate(time);
                             return self.build_elem(docontent, pfx, prop, tm);
                         }

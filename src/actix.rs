@@ -138,8 +138,7 @@ impl actix_web::Responder for DavResponse {
         match body.inner {
             BodyType::Bytes(None) => builder.body(""),
             BodyType::Bytes(Some(b)) => builder.body(b),
-            BodyType::Empty => builder.body(""),
-            b @ BodyType::AsyncStream(..) => builder.streaming(Body { inner: b }),
+            b @ BodyType::Stream(..) => builder.streaming(Body { inner: b }),
         }
     }
 }

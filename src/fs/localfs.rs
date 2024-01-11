@@ -4,28 +4,21 @@
 //! is to create a new instance in your handler every time
 //! you need one.
 
-use std::collections::VecDeque;
-use std::future::Future;
 use std::io;
 #[cfg(unix)]
 use std::os::unix::{
     ffi::OsStrExt,
     fs::{MetadataExt, PermissionsExt},
 };
-#[cfg(target_os = "windows")]
-use std::os::windows::prelude::*;
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use async_stream::stream;
 use bytes::{Buf, Bytes, BytesMut};
-use futures_util::{future, future::BoxFuture, FutureExt, Stream};
-use pin_utils::pin_mut;
+use futures_util::{future, FutureExt};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
-use super::localfs_macos::DUCacheBuilder;
 use crate::davpath::DavPath;
 use crate::fs::*;
 
@@ -44,14 +37,6 @@ pub(crate) struct LocalFs {
 
 #[derive(Debug)]
 struct LocalFsFile(tokio::fs::File);
-
-struct ReadDir {
-    do_meta: ReadDirMeta,
-    buffer: VecDeque<io::Result<DirEntry>>,
-    dir_cache: Option<DUCacheBuilder>,
-    iterator: Option<tokio::fs::ReadDir>,
-    fut: Option<BoxFuture<'static, ReadDirBatch>>,
-}
 
 // Items from the readdir stream.
 struct DirEntry {
@@ -139,25 +124,35 @@ impl DavFileSystem for LocalFs {
         .boxed()
     }
 
-    // read_dir is a bit more involved - but not much - than a simple wrapper,
-    // because it returns a stream.
     fn read_dir<'a>(
         &'a self,
         davpath: &'a DavPath,
-        meta: ReadDirMeta,
+        _meta: ReadDirMeta,
     ) -> FsFuture<'a, FsStream<Box<dyn DavDirEntry>>> {
         async move {
             trace!("FS: read_dir {davpath:?}");
             let path = self.abs_path(davpath);
-            let iter = tokio::fs::read_dir(&path).await?;
-            let stream = ReadDir {
-                do_meta: meta,
-                buffer: VecDeque::new(),
-                dir_cache: self.dir_cache_builder(path),
-                iterator: Some(iter),
-                fut: None,
-            };
-            Ok(Box::pin(stream) as _)
+            let mut read_dir = tokio::fs::read_dir(&path).await?;
+            let mut dir_cache = self.dir_cache_builder(path);
+            Ok(Box::pin(stream! {
+                loop {
+                    match read_dir.next_entry().await {
+                        Ok(Some(entry)) => {
+                            if let Some(cache) = &mut dir_cache {
+                                cache.add(entry.file_name());
+                            }
+                            let meta = entry.metadata().await;
+                            yield Box::new(DirEntry { meta, entry }) as Box<dyn DavDirEntry>;
+                        }
+                        Ok(None) => break,
+                        Err(e) => {
+                            debug!("read_dir failed {e}");
+                            break;
+                        }
+                    }
+                }
+                dir_cache.map(|mut cache| cache.finish());
+            }) as _)
         }
         .boxed()
     }
@@ -173,28 +168,20 @@ impl DavFileSystem for LocalFs {
                 return Err(FsError::Forbidden);
             }
             let path = self.abs_path(path);
+            let mut opt = tokio::fs::OpenOptions::new();
+            opt.read(options.read)
+                .write(options.write)
+                .append(options.append)
+                .truncate(options.truncate)
+                .create(options.create)
+                .create_new(options.create_new);
             #[cfg(unix)]
-            let res = tokio::fs::OpenOptions::new()
-                .read(options.read)
-                .write(options.write)
-                .append(options.append)
-                .truncate(options.truncate)
-                .create(options.create)
-                .create_new(options.create_new)
-                .mode(if self.public { 0o644 } else { 0o600 })
-                .open(path)
-                .await;
-            #[cfg(windows)]
-            let res = tokio::fs::OpenOptions::new()
-                .read(options.read)
-                .write(options.write)
-                .append(options.append)
-                .truncate(options.truncate)
-                .create(options.create)
-                .create_new(options.create_new)
-                .open(path)
-                .await;
-            match res {
+            if self.public {
+                opt.mode(0o644);
+            } else {
+                opt.mode(0o600);
+            }
+            match opt.open(path).await {
                 Ok(file) => Ok(Box::new(LocalFsFile(file)) as Box<dyn DavFile>),
                 Err(e) => Err(e.into()),
             }
@@ -208,23 +195,12 @@ impl DavFileSystem for LocalFs {
             if self.is_forbidden(path) {
                 return Err(FsError::Forbidden);
             }
-            let _public = self.public;
             let path = self.abs_path(path);
+            #[allow(unused_mut)]
+            let mut dir = tokio::fs::DirBuilder::new();
             #[cfg(unix)]
-            {
-                tokio::fs::DirBuilder::new()
-                    .mode(if _public { 0o755 } else { 0o700 })
-                    .create(path)
-                    .map_err(|e| e.into())
-                    .await
-            }
-            #[cfg(windows)]
-            {
-                tokio::fs::DirBuilder::new()
-                    .create(path)
-                    .map_err(|e| e.into())
-                    .await
-            }
+            dir.mode(if self.public { 0o755 } else { 0o700 });
+            Ok(dir.create(path).await?)
         }
         .boxed()
     }
@@ -293,115 +269,6 @@ impl DavFileSystem for LocalFs {
             }
         }
         .boxed()
-    }
-}
-
-// read_batch() result.
-struct ReadDirBatch {
-    iterator: Option<tokio::fs::ReadDir>,
-    buffer: VecDeque<io::Result<DirEntry>>,
-}
-
-// Read the next batch of LocalFsDirEntry structs (up to 256).
-// This is sync code, must be run in `blocking()`.
-async fn read_batch(iterator: Option<tokio::fs::ReadDir>, do_meta: ReadDirMeta) -> ReadDirBatch {
-    let mut buffer = VecDeque::new();
-    let mut iterator = match iterator {
-        Some(i) => i,
-        None => {
-            return ReadDirBatch {
-                buffer,
-                iterator: None,
-            }
-        }
-    };
-    for _ in 0..256 {
-        match iterator.next_entry().await {
-            Ok(Some(entry)) => {
-                let meta = match do_meta {
-                    ReadDirMeta::Data => std::fs::metadata(entry.path()),
-                    ReadDirMeta::DataSymlink => entry.metadata().await,
-                };
-                let d = DirEntry { meta, entry };
-                buffer.push_back(Ok(d))
-            }
-            Err(e) => {
-                buffer.push_back(Err(e));
-                break;
-            }
-            Ok(None) => break,
-        }
-    }
-    ReadDirBatch {
-        buffer,
-        iterator: Some(iterator),
-    }
-}
-
-impl ReadDir {
-    // Create a future that calls read_batch().
-    //
-    // The 'iterator' is moved into the future, and returned when it completes,
-    // together with a list of directory entries.
-    fn read_batch(&mut self) -> BoxFuture<'static, ReadDirBatch> {
-        let iterator = self.iterator.take();
-        let do_meta = self.do_meta;
-
-        read_batch(iterator, do_meta).boxed()
-    }
-}
-
-// The stream implementation tries to be smart and batch I/O operations
-impl Stream for ReadDir {
-    type Item = Box<dyn DavDirEntry>;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = Pin::into_inner(self);
-
-        // If the buffer is empty, fill it.
-        if this.buffer.is_empty() {
-            // If we have no pending future, create one.
-            if this.fut.is_none() {
-                if this.iterator.is_none() {
-                    return Poll::Ready(None);
-                }
-                this.fut = Some(this.read_batch());
-            }
-
-            // Poll the future.
-            let fut = this.fut.as_mut().unwrap();
-            pin_mut!(fut);
-            match Pin::new(&mut fut).poll(cx) {
-                Poll::Ready(batch) => {
-                    this.fut.take();
-                    if let Some(ref mut nb) = this.dir_cache {
-                        batch.buffer.iter().for_each(|e| {
-                            if let Ok(ref e) = e {
-                                nb.add(e.entry.file_name());
-                            }
-                        });
-                    }
-                    this.buffer = batch.buffer;
-                    this.iterator = batch.iterator;
-                }
-                Poll::Pending => return Poll::Pending,
-            }
-        }
-
-        // we filled the buffer, now pop from the buffer.
-        match this.buffer.pop_front() {
-            Some(Ok(item)) => Poll::Ready(Some(Box::new(item))),
-            Some(Err(_)) | None => {
-                // fuse the iterator.
-                this.iterator.take();
-                // finish the cache.
-                if let Some(ref mut nb) = this.dir_cache {
-                    nb.finish();
-                }
-                // return end-of-stream.
-                Poll::Ready(None)
-            }
-        }
     }
 }
 
@@ -512,17 +379,6 @@ impl DavMetaData for std::fs::Metadata {
     fn accessed(&self) -> FsResult<SystemTime> {
         self.accessed().map_err(|e| e.into())
     }
-
-    #[cfg(unix)]
-    fn status_changed(&self) -> FsResult<SystemTime> {
-        Ok(UNIX_EPOCH + Duration::new(self.ctime() as u64, 0))
-    }
-
-    #[cfg(windows)]
-    fn status_changed(&self) -> FsResult<SystemTime> {
-        Ok(UNIX_EPOCH + Duration::from_nanos(self.creation_time() - 116444736000000000))
-    }
-
     fn is_dir(&self) -> bool {
         self.is_dir()
     }
@@ -532,40 +388,27 @@ impl DavMetaData for std::fs::Metadata {
     fn is_symlink(&self) -> bool {
         self.file_type().is_symlink()
     }
-
-    #[cfg(unix)]
     fn executable(&self) -> FsResult<bool> {
+        #[cfg(unix)]
         if self.is_file() {
             return Ok((self.permissions().mode() & 0o100) > 0);
         }
-        Err(FsError::NotImplemented)
-    }
-
-    #[cfg(windows)]
-    fn executable(&self) -> FsResult<bool> {
         // FIXME: implement
         Err(FsError::NotImplemented)
     }
 
     // same as the default apache etag.
-    #[cfg(unix)]
     fn etag(&self) -> Option<String> {
         let modified = self.modified().ok()?;
         let t = modified.duration_since(UNIX_EPOCH).ok()?;
         let t = t.as_secs() * 1000000 + t.subsec_nanos() as u64 / 1000;
+        #[cfg(unix)]
         if self.is_file() {
             Some(format!("{:x}-{:x}-{:x}", self.ino(), self.len(), t))
         } else {
             Some(format!("{:x}-{:x}", self.ino(), t))
         }
-    }
-
-    // same as the default apache etag.
-    #[cfg(windows)]
-    fn etag(&self) -> Option<String> {
-        let modified = self.modified().ok()?;
-        let t = modified.duration_since(UNIX_EPOCH).ok()?;
-        let t = t.as_secs() * 1000000 + t.subsec_nanos() as u64 / 1000;
+        #[cfg(windows)]
         if self.is_file() {
             Some(format!("{:x}-{:x}", self.len(), t))
         } else {

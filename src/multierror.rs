@@ -1,5 +1,4 @@
-use std::io;
-
+use async_stream::try_stream;
 use futures_util::{Stream, StreamExt};
 
 use http::{Response, StatusCode};
@@ -8,7 +7,6 @@ use xml::writer::EventWriter;
 use xml::writer::XmlEvent as XmlWEvent;
 use xml::EmitterConfig;
 
-use crate::async_stream::AsyncStream;
 use crate::body::Body;
 use crate::davpath::DavPath;
 use crate::util::MemBuffer;
@@ -102,55 +100,48 @@ where
     }
 
     // Transform path/status items to XML.
-    let body = AsyncStream::new(|mut tx| {
-        async move {
-            // Write initial header.
-            let mut xw = EventWriter::new_with_config(
-                MemBuffer::new(),
-                EmitterConfig {
-                    perform_indent: true,
-                    ..EmitterConfig::default()
-                },
-            );
-            xw.write(XmlWEvent::StartDocument {
-                version: XmlVersion::Version10,
-                encoding: Some("utf-8"),
-                standalone: None,
-            })
+    let body = try_stream! {
+        // Write initial header.
+        let mut xw = EventWriter::new_with_config(
+            MemBuffer::new(),
+            EmitterConfig {
+                perform_indent: true,
+                ..EmitterConfig::default()
+            },
+        );
+        xw.write(XmlWEvent::StartDocument {
+            version: XmlVersion::Version10,
+            encoding: Some("utf-8"),
+            standalone: None,
+        })
+        .map_err(DavError::from)?;
+        xw.write(XmlWEvent::start_element("D:multistatus").ns("D", "DAV:"))
             .map_err(DavError::from)?;
-            xw.write(XmlWEvent::start_element("D:multistatus").ns("D", "DAV:"))
-                .map_err(DavError::from)?;
-            let data = xw.inner_mut().take();
-            tx.send(data).await;
+        yield xw.inner_mut().take();
 
-            // now write the items.
-            let mut status_stream = futures_util::stream::iter(items).chain(status_stream);
-            while let Some(res) = status_stream.next().await {
-                let (path, status) = res?;
-                let status = if status == StatusCode::NO_CONTENT {
-                    StatusCode::OK
-                } else {
-                    status
-                };
-                write_response(&mut xw, &path, status)?;
-                let data = xw.inner_mut().take();
-                tx.send(data).await;
-            }
-
-            // and finally write the trailer.
-            xw.write(XmlWEvent::end_element()).map_err(DavError::from)?;
-            let data = xw.inner_mut().take();
-            tx.send(data).await;
-
-            Ok::<_, io::Error>(())
+        // now write the items.
+        let mut status_stream = futures_util::stream::iter(items).chain(status_stream);
+        while let Some(res) = status_stream.next().await {
+            let (path, status) = res?;
+            let status = if status == StatusCode::NO_CONTENT {
+                StatusCode::OK
+            } else {
+                status
+            };
+            write_response(&mut xw, &path, status)?;
+            yield xw.inner_mut().take();
         }
-    });
+
+        // and finally write the trailer.
+        xw.write(XmlWEvent::end_element()).map_err(DavError::from)?;
+        yield xw.inner_mut().take();
+    };
 
     // return response.
     let resp = Response::builder()
         .header("content-type", "application/xml; charset=utf-8")
         .status(StatusCode::MULTI_STATUS)
-        .body(Body::from(body))
+        .body(Body::stream(body))
         .unwrap();
     Ok(resp)
 }

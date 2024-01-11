@@ -1,13 +1,13 @@
 use std::cmp;
 use std::io::Write;
 
+use async_stream::try_stream;
 use futures_util::StreamExt;
 use headers::HeaderMapExt;
 use http::{status::StatusCode, Request, Response};
 
 use bytes::Bytes;
 
-use crate::async_stream::AsyncStream;
 use crate::body::Body;
 use crate::conditional;
 use crate::davheaders;
@@ -203,65 +203,62 @@ impl crate::DavHandler {
 
         // now just loop and send data.
         let read_buf_size = self.read_buf_size;
-        *res.body_mut() = Body::from(AsyncStream::new(|mut tx| {
-            async move {
-                let zero = [0; 4096];
+        *res.body_mut() = Body::stream(try_stream! {
+            let zero = [0; 4096];
 
-                let multipart = ranges.len() > 1;
-                for range in ranges {
-                    trace!(
-                        "handle_get: start = {}, count = {}",
-                        range.start,
-                        range.count
-                    );
-                    if curpos != range.start {
-                        // this should never fail, but if it does, just skip this range
-                        // and try the next one.
-                        if let Err(_e) = file.seek(std::io::SeekFrom::Start(range.start)).await {
-                            debug!("handle_get: failed to seek to {}: {:?}", range.start, _e);
-                            continue;
-                        }
-                        curpos = range.start;
+            let multipart = ranges.len() > 1;
+            for range in ranges {
+                trace!(
+                    "handle_get: start = {}, count = {}",
+                    range.start,
+                    range.count
+                );
+                if curpos != range.start {
+                    // this should never fail, but if it does, just skip this range
+                    // and try the next one.
+                    if let Err(_e) = file.seek(std::io::SeekFrom::Start(range.start)).await {
+                        debug!("handle_get: failed to seek to {}: {:?}", range.start, _e);
+                        continue;
                     }
-
-                    if multipart {
-                        let mut hdrs = Vec::new();
-                        let _ = write!(hdrs, "{}", BOUNDARY_START);
-                        let _ = writeln!(
-                            hdrs,
-                            "Content-Range: bytes {}-{}/{}",
-                            range.start,
-                            range.start + range.count - 1,
-                            len
-                        );
-                        let _ = writeln!(hdrs, "Content-Type: {}", content_type);
-                        let _ = writeln!(hdrs);
-                        tx.send(Bytes::from(hdrs)).await;
-                    }
-
-                    let mut count = range.count;
-                    while count > 0 {
-                        let blen = cmp::min(count, read_buf_size as u64) as usize;
-                        let mut buf = file.read_bytes(blen).await?;
-                        if buf.is_empty() {
-                            // this is a cop out. if the file got truncated, just
-                            // return zeroed bytes instead of file content.
-                            let n = if count > 4096 { 4096 } else { count as usize };
-                            buf = Bytes::copy_from_slice(&zero[..n]);
-                        }
-                        let len = buf.len() as u64;
-                        count = count.saturating_sub(len);
-                        curpos += len;
-                        trace!("sending {} bytes", len);
-                        tx.send(buf).await;
-                    }
+                    curpos = range.start;
                 }
+
                 if multipart {
-                    tx.send(Bytes::from(BOUNDARY_END)).await;
+                    let mut hdrs = Vec::new();
+                    let _ = write!(hdrs, "{}", BOUNDARY_START);
+                    let _ = writeln!(
+                        hdrs,
+                        "Content-Range: bytes {}-{}/{}",
+                        range.start,
+                        range.start + range.count - 1,
+                        len
+                    );
+                    let _ = writeln!(hdrs, "Content-Type: {}", content_type);
+                    let _ = writeln!(hdrs);
+                    yield Bytes::from(hdrs);
                 }
-                Ok::<(), std::io::Error>(())
+
+                let mut count = range.count;
+                while count > 0 {
+                    let blen = cmp::min(count, read_buf_size as u64) as usize;
+                    let mut buf = file.read_bytes(blen).await?;
+                    if buf.is_empty() {
+                        // this is a cop out. if the file got truncated, just
+                        // return zeroed bytes instead of file content.
+                        let n = count.min(zero.len() as u64) as usize;
+                        buf = Bytes::copy_from_slice(&zero[..n]);
+                    }
+                    let len = buf.len() as u64;
+                    count = count.saturating_sub(len);
+                    curpos += len;
+                    trace!("sending {} bytes", len);
+                    yield buf;
+                }
             }
-        }));
+            if multipart {
+                yield Bytes::from(BOUNDARY_END);
+            }
+        });
 
         Ok(res)
     }
@@ -300,139 +297,134 @@ impl crate::DavHandler {
         }
 
         // now just loop and send data.
-        *res.body_mut() = Body::from(AsyncStream::new(|mut tx| {
-            async move {
-                // transform all entries into a dirent struct.
-                struct Dirent {
-                    path: String,
-                    name: String,
-                    meta: Box<dyn DavMetaData>,
-                }
-
-                let mut dirents: Vec<Dirent> = Vec::new();
-                while let Some(dirent) = entries.next().await {
-                    let mut name = dirent.name();
-                    if name.starts_with(b".") {
-                        continue;
-                    }
-                    let mut npath = path.clone();
-                    npath.push_segment(&name);
-                    if let Ok(meta) = dirent.metadata().await {
-                        if meta.is_dir() {
-                            name.push(b'/');
-                            npath.add_slash();
-                        }
-                        dirents.push(Dirent {
-                            path: npath.with_prefix().as_url_string(),
-                            name: String::from_utf8_lossy(&name).to_string(),
-                            meta,
-                        });
-                    }
-                }
-
-                // now we can sort the dirent struct.
-                dirents.sort_by(|a, b| {
-                    let adir = a.meta.is_dir();
-                    let bdir = b.meta.is_dir();
-                    if adir && !bdir {
-                        std::cmp::Ordering::Less
-                    } else if bdir && !adir {
-                        std::cmp::Ordering::Greater
-                    } else {
-                        (a.name).cmp(&b.name)
-                    }
-                });
-
-                // and output html
-                let upath = htmlescape::encode_minimal(&path.with_prefix().as_url_string());
-                let mut w = String::new();
-                w.push_str(
-                    "\
-                    <html><head>\n\
-                    <meta name=\"referrer\" content=\"no-referrer\" />\n\
-                    <title>Index of ",
-                );
-                w.push_str(&upath);
-                w.push_str("</title>\n");
-                w.push_str(
-                    "\
-                    <style>\n\
-                    table {\n\
-                      border-collapse: separate;\n\
-                      border-spacing: 1.5em 0.25em;\n\
-                    }\n\
-                    h1 {\n\
-                      padding-left: 0.3em;\n\
-                    }\n\
-                    a {\n\
-                      text-decoration: none;\n\
-                      color: blue;\n\
-                    }\n\
-                    .left {\n\
-                      text-align: left;\n\
-                    }\n\
-                    .mono {\n\
-                      font-family: monospace;\n\
-                    }\n\
-                    .mw20 {\n\
-                      min-width: 20em;\n\
-                    }\n\
-                    </style>\n\
-                    </head>\n\
-                    <body>\n",
-                );
-                w.push_str(&format!("<h1>Index of {}</h1>", display_path(&path)));
-                w.push_str(
-                    "\
-                    <table>\n\
-                    <tr>\n\
-                      <th class=\"left mw20\">Name</th>\n\
-                      <th class=\"left\">Last modified</th>\n\
-                      <th>Size</th>\n\
-                    </tr>\n\
-                    <tr><th colspan=\"3\"><hr></th></tr>\n\
-                    <tr>\n\
-                      <td><a href=\"..\">Parent Directory</a></td>\n\
-                      <td>&nbsp;</td>\n\
-                      <td class=\"mono\" align=\"right\">[DIR]    </td>\n\
-                    </tr>\n",
-                );
-
-                tx.send(Bytes::from(w)).await;
-
-                for dirent in &dirents {
-                    let modified = match dirent.meta.modified() {
-                        Ok(t) => {
-                            let tm = systemtime_to_offsetdatetime(t);
-                            format!(
-                                "{:04}-{:02}-{:02} {:02}:{:02}",
-                                tm.year(),
-                                tm.month(),
-                                tm.day(),
-                                tm.hour(),
-                                tm.minute(),
-                            )
-                        }
-                        Err(_) => "".to_string(),
-                    };
-                    let size = match dirent.meta.is_file() {
-                        true => display_size(dirent.meta.len()),
-                        false => "[DIR]    ".to_string(),
-                    };
-                    let name = htmlescape::encode_minimal(&dirent.name);
-                    let s = format!("<tr><td><a href=\"{}\">{}</a></td><td class=\"mono\">{}</td><td class=\"mono\" align=\"right\">{}</td></tr>",
-                         dirent.path, name, modified, size);
-                    tx.send(Bytes::from(s)).await;
-                }
-
-                let mut w = String::new();
-                w.push_str("<tr><th colspan=\"3\"><hr></th></tr>");
-                w.push_str("</table></body></html>");
-                tx.send(Bytes::from(w)).await;
-
-                Ok::<_, std::io::Error>(())
+        *res.body_mut() = Body::stream(try_stream! {
+            // transform all entries into a dirent struct.
+            struct Dirent {
+                path: String,
+                name: String,
+                meta: Box<dyn DavMetaData>,
             }
-        }));
+
+            let mut dirents: Vec<Dirent> = Vec::new();
+            while let Some(dirent) = entries.next().await {
+                let mut name = dirent.name();
+                if name.starts_with(b".") {
+                    continue;
+                }
+                let mut npath = path.clone();
+                npath.push_segment(&name);
+                if let Ok(meta) = dirent.metadata().await {
+                    if meta.is_dir() {
+                        name.push(b'/');
+                        npath.add_slash();
+                    }
+                    dirents.push(Dirent {
+                        path: npath.with_prefix().as_url_string(),
+                        name: String::from_utf8_lossy(&name).to_string(),
+                        meta,
+                    });
+                }
+            }
+
+            // now we can sort the dirent struct.
+            dirents.sort_by(|a, b| {
+                let adir = a.meta.is_dir();
+                let bdir = b.meta.is_dir();
+                if adir && !bdir {
+                    std::cmp::Ordering::Less
+                } else if bdir && !adir {
+                    std::cmp::Ordering::Greater
+                } else {
+                    (a.name).cmp(&b.name)
+                }
+            });
+
+            // and output html
+            let upath = htmlescape::encode_minimal(&path.with_prefix().as_url_string());
+            let mut w = String::new();
+            w.push_str(
+                "\
+                <html><head>\n\
+                <meta name=\"referrer\" content=\"no-referrer\" />\n\
+                <title>Index of ",
+            );
+            w.push_str(&upath);
+            w.push_str("</title>\n");
+            w.push_str(
+                "\
+                <style>\n\
+                table {\n\
+                  border-collapse: separate;\n\
+                  border-spacing: 1.5em 0.25em;\n\
+                }\n\
+                h1 {\n\
+                  padding-left: 0.3em;\n\
+                }\n\
+                a {\n\
+                  text-decoration: none;\n\
+                  color: blue;\n\
+                }\n\
+                .left {\n\
+                  text-align: left;\n\
+                }\n\
+                .mono {\n\
+                  font-family: monospace;\n\
+                }\n\
+                .mw20 {\n\
+                  min-width: 20em;\n\
+                }\n\
+                </style>\n\
+                </head>\n\
+                <body>\n",
+            );
+            w.push_str(&format!("<h1>Index of {}</h1>", display_path(&path)));
+            w.push_str(
+                "\
+                <table>\n\
+                <tr>\n\
+                  <th class=\"left mw20\">Name</th>\n\
+                  <th class=\"left\">Last modified</th>\n\
+                  <th>Size</th>\n\
+                </tr>\n\
+                <tr><th colspan=\"3\"><hr></th></tr>\n\
+                <tr>\n\
+                  <td><a href=\"..\">Parent Directory</a></td>\n\
+                  <td>&nbsp;</td>\n\
+                  <td class=\"mono\" align=\"right\">[DIR]    </td>\n\
+                </tr>\n",
+            );
+
+            yield Bytes::from(w);
+
+            for dirent in &dirents {
+                let modified = if let Ok(t) = dirent.meta.modified() {
+                    let tm = systemtime_to_offsetdatetime(t);
+                    format!(
+                        "{:04}-{:02}-{:02} {:02}:{:02}",
+                        tm.year(),
+                        tm.month(),
+                        tm.day(),
+                        tm.hour(),
+                        tm.minute(),
+                    )
+                } else {
+                    "".to_string()
+                };
+                let size = match dirent.meta.is_file() {
+                    true => display_size(dirent.meta.len()),
+                    false => "[DIR]    ".to_string(),
+                };
+                let name = htmlescape::encode_minimal(&dirent.name);
+                let s = format!("<tr><td><a href=\"{}\">{}</a></td><td class=\"mono\">{}</td><td class=\"mono\" align=\"right\">{}</td></tr>",
+                     dirent.path, name, modified, size);
+                yield Bytes::from(s);
+            }
+
+            let mut w = String::new();
+            w.push_str("<tr><th colspan=\"3\"><hr></th></tr>");
+            w.push_str("</table></body></html>");
+            yield Bytes::from(w);
+        });
 
         Ok(res)
     }

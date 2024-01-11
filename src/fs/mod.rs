@@ -385,11 +385,6 @@ pub trait DavMetaData: Debug + Send + Sync {
         notimplemented!("creation time")
     }
 
-    /// Inode change time (ctime). Default: `FsError::NotImplemented`.
-    fn status_changed(&self) -> FsResult<SystemTime> {
-        notimplemented!("status change time")
-    }
-
     /// Is file executable (unix: has "x" mode bit). Default: `FsError::NotImplemented`.
     fn executable(&self) -> FsResult<bool> {
         notimplemented!("executable")

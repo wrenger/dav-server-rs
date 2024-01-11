@@ -150,8 +150,7 @@ async fn serve(
     Ok(())
 }
 
-#[cfg(test)]
-#[cfg(target_family = "unix")]
+#[cfg(all(test, unix))]
 mod test {
     use std::env::current_dir;
     use std::path::PathBuf;

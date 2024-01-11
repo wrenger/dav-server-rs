@@ -6,11 +6,12 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use bytes::{Buf, Bytes};
-use futures_util::stream::Stream;
+use futures_util::stream::{BoxStream, Stream};
 use http::header::HeaderMap;
 use http_body::Body as HttpBody;
 
-use crate::async_stream::AsyncStream;
+use pin_project::pin_project;
+use pin_utils::pin_mut;
 
 /// Body is returned by the webdav handler, and implements both `Stream`
 /// and `http_body::Body`.
@@ -20,15 +21,20 @@ pub struct Body {
 
 pub(crate) enum BodyType {
     Bytes(Option<Bytes>),
-    AsyncStream(AsyncStream<Bytes, io::Error>),
-    Empty,
+    Stream(BoxStream<'static, Result<Bytes, io::Error>>),
 }
 
 impl Body {
     /// Return an empty body.
     pub fn empty() -> Body {
         Body {
-            inner: BodyType::Empty,
+            inner: BodyType::Bytes(None),
+        }
+    }
+    /// Create a body from a stream.
+    pub fn stream(stream: impl Stream<Item = Result<Bytes, io::Error>> + Send + 'static) -> Body {
+        Body {
+            inner: BodyType::Stream(Box::pin(stream)),
         }
     }
 }
@@ -39,11 +45,10 @@ impl Stream for Body {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         match &mut self.inner {
             BodyType::Bytes(bytes) => Poll::Ready(bytes.take().map(Ok)),
-            BodyType::AsyncStream(stream) => {
-                let stream = Pin::new(stream);
+            BodyType::Stream(stream) => {
+                pin_mut!(stream);
                 stream.poll_next(cx)
             }
-            BodyType::Empty => Poll::Ready(None),
         }
     }
 }
@@ -91,19 +96,7 @@ impl From<Bytes> for Body {
     }
 }
 
-impl From<AsyncStream<Bytes, io::Error>> for Body {
-    fn from(s: AsyncStream<Bytes, io::Error>) -> Body {
-        Body {
-            inner: BodyType::AsyncStream(s),
-        }
-    }
-}
-
-use pin_project::pin_project;
-
-//
 // A struct that contains a Stream, and implements http_body::Body.
-//
 #[pin_project]
 pub(crate) struct StreamBody<B> {
     #[pin]
