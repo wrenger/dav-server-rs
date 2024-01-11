@@ -12,10 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use bytes::{Buf, Bytes};
-use futures_util::{
-    future,
-    future::{BoxFuture, FutureExt},
-};
+use futures_util::{future, future::FutureExt};
 use http::StatusCode;
 
 use crate::davpath::DavPath;
@@ -26,9 +23,7 @@ type Tree = tree::Tree<Vec<u8>, Node>;
 
 /// Ephemeral in-memory filesystem.
 #[derive(Debug)]
-pub struct MemFs {
-    tree: Arc<Mutex<Tree>>,
-}
+pub struct MemFs(Arc<Mutex<Tree>>);
 
 #[derive(Debug, Clone)]
 enum Node {
@@ -72,18 +67,17 @@ impl MemFs {
     /// Create a new "memfs" filesystem.
     pub fn new() -> Arc<MemFs> {
         let root = Node::new_dir();
-        Arc::new(MemFs {
-            tree: Arc::new(Mutex::new(Tree::new(root))),
-        })
+        Arc::new(MemFs(Arc::new(Mutex::new(Tree::new(root)))))
     }
 
-    fn do_open(
-        &self,
-        tree: &mut Tree,
-        path: &[u8],
+    fn do_open<'a>(
+        &'a self,
+        tree: Arc<Mutex<Tree>>,
+        path: &'a [u8],
         options: OpenOptions,
     ) -> FsResult<Box<dyn DavFile>> {
-        let node_id = match tree.lookup(path) {
+        let mut tree_g = tree.lock().unwrap();
+        let node_id = match tree_g.lookup(path) {
             Ok(n) => {
                 if options.create_new {
                     return Err(FsError::Exists);
@@ -94,12 +88,12 @@ impl MemFs {
                 if !options.create {
                     return Err(FsError::NotFound);
                 }
-                let parent_id = tree.lookup_parent(path)?;
-                tree.add_child(parent_id, file_name(path), Node::new_file(), true)?
+                let parent_id = tree_g.lookup_parent(path)?;
+                tree_g.add_child(parent_id, file_name(path), Node::new_file(), true)?
             }
             Err(e) => return Err(e),
         };
-        let node = tree.get_node_mut(node_id).unwrap();
+        let node = tree_g.get_node_mut(node_id).unwrap();
         if node.is_dir() {
             return Err(FsError::Forbidden);
         }
@@ -108,7 +102,7 @@ impl MemFs {
             node.update_mtime(SystemTime::now());
         }
         Ok(Box::new(MemFsFile {
-            tree: self.tree.clone(),
+            tree: tree.clone(),
             node_id,
             pos: 0,
             append: options.append,
@@ -116,18 +110,10 @@ impl MemFs {
     }
 }
 
-impl Clone for MemFs {
-    fn clone(&self) -> Self {
-        MemFs {
-            tree: Arc::clone(&self.tree),
-        }
-    }
-}
-
 impl DavFileSystem for MemFs {
-    fn metadata<'a>(&'a self, path: &'a DavPath) -> FsFuture<Box<dyn DavMetaData>> {
+    fn metadata<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, Box<dyn DavMetaData>> {
         async move {
-            let tree = &*self.tree.lock().unwrap();
+            let tree = &*self.0.lock().unwrap();
             let node_id = tree.lookup(path.as_bytes())?;
             let meta = tree.get_node(node_id)?.as_dirent(path.as_bytes());
             Ok(Box::new(meta) as Box<dyn DavMetaData>)
@@ -139,9 +125,9 @@ impl DavFileSystem for MemFs {
         &'a self,
         path: &'a DavPath,
         _meta: ReadDirMeta,
-    ) -> FsFuture<FsStream<Box<dyn DavDirEntry>>> {
+    ) -> FsFuture<'a, FsStream<Box<dyn DavDirEntry>>> {
         async move {
-            let tree = &*self.tree.lock().unwrap();
+            let tree = &*self.0.lock().unwrap();
             let node_id = tree.lookup(path.as_bytes())?;
             if !tree.get_node(node_id)?.is_dir() {
                 return Err(FsError::Forbidden);
@@ -158,18 +144,18 @@ impl DavFileSystem for MemFs {
         .boxed()
     }
 
-    fn open<'a>(&'a self, path: &'a DavPath, options: OpenOptions) -> FsFuture<Box<dyn DavFile>> {
-        async move {
-            let tree = &mut *self.tree.lock().unwrap();
-            self.do_open(tree, path.as_bytes(), options)
-        }
-        .boxed()
+    fn open<'a>(
+        &'a self,
+        path: &'a DavPath,
+        options: OpenOptions,
+    ) -> FsFuture<'a, Box<dyn DavFile>> {
+        async move { self.do_open(self.0.clone(), path.as_bytes(), options) }.boxed()
     }
 
-    fn create_dir<'a>(&'a self, path: &'a DavPath) -> FsFuture<()> {
+    fn create_dir<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, ()> {
         async move {
             trace!("FS: create_dir {:?}", path);
-            let tree = &mut *self.tree.lock().unwrap();
+            let tree = &mut *self.0.lock().unwrap();
             let path = path.as_bytes();
             let parent_id = tree.lookup_parent(path)?;
             tree.add_child(parent_id, file_name(path), Node::new_dir(), false)?;
@@ -180,9 +166,9 @@ impl DavFileSystem for MemFs {
         .boxed()
     }
 
-    fn remove_file<'a>(&'a self, path: &'a DavPath) -> FsFuture<()> {
+    fn remove_file<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, ()> {
         async move {
-            let tree = &mut *self.tree.lock().unwrap();
+            let tree = &mut *self.0.lock().unwrap();
             let parent_id = tree.lookup_parent(path.as_bytes())?;
             let node_id = tree.lookup(path.as_bytes())?;
             tree.delete_node(node_id)?;
@@ -193,9 +179,9 @@ impl DavFileSystem for MemFs {
         .boxed()
     }
 
-    fn remove_dir<'a>(&'a self, path: &'a DavPath) -> FsFuture<()> {
+    fn remove_dir<'a>(&'a self, path: &'a DavPath) -> FsFuture<'a, ()> {
         async move {
-            let tree = &mut *self.tree.lock().unwrap();
+            let tree = &mut *self.0.lock().unwrap();
             let parent_id = tree.lookup_parent(path.as_bytes())?;
             let node_id = tree.lookup(path.as_bytes())?;
             tree.delete_node(node_id)?;
@@ -206,9 +192,9 @@ impl DavFileSystem for MemFs {
         .boxed()
     }
 
-    fn rename<'a>(&'a self, from: &'a DavPath, to: &'a DavPath) -> FsFuture<()> {
+    fn rename<'a>(&'a self, from: &'a DavPath, to: &'a DavPath) -> FsFuture<'a, ()> {
         async move {
-            let tree = &mut *self.tree.lock().unwrap();
+            let tree = &mut *self.0.lock().unwrap();
             let node_id = tree.lookup(from.as_bytes())?;
             let parent_id = tree.lookup_parent(from.as_bytes())?;
             let dst_id = tree.lookup_parent(to.as_bytes())?;
@@ -221,19 +207,18 @@ impl DavFileSystem for MemFs {
         .boxed()
     }
 
-    fn copy<'a>(&'a self, from: &'a DavPath, to: &'a DavPath) -> FsFuture<()> {
+    fn copy<'a>(&'a self, from: &'a DavPath, to: &'a DavPath) -> FsFuture<'a, ()> {
         async move {
-            let tree = &mut *self.tree.lock().unwrap();
-
             // source must exist.
-            let snode_id = tree.lookup(from.as_bytes())?;
+            let snode_id = self.0.lock().unwrap().lookup(from.as_bytes())?;
 
             // make sure destination exists, create if needed.
             {
                 let mut oo = OpenOptions::write();
                 oo.create = true;
-                self.do_open(tree, to.as_bytes(), oo)?;
+                self.do_open(self.0.clone(), to.as_bytes(), oo)?;
             }
+            let mut tree = self.0.lock().unwrap();
             let dnode_id = tree.lookup(to.as_bytes())?;
 
             // copy.
@@ -257,9 +242,9 @@ impl DavFileSystem for MemFs {
         &'a self,
         path: &'a DavPath,
         mut patch: Vec<(bool, DavProp)>,
-    ) -> FsFuture<Vec<(StatusCode, DavProp)>> {
+    ) -> FsFuture<'a, Vec<(StatusCode, DavProp)>> {
         async move {
-            let tree = &mut *self.tree.lock().unwrap();
+            let tree = &mut *self.0.lock().unwrap();
             let node_id = tree.lookup(path.as_bytes())?;
             let node = tree.get_node_mut(node_id)?;
             let props = node.get_props_mut();
@@ -286,9 +271,9 @@ impl DavFileSystem for MemFs {
         .boxed()
     }
 
-    fn get_props<'a>(&'a self, path: &'a DavPath, do_content: bool) -> FsFuture<Vec<DavProp>> {
+    fn get_props<'a>(&'a self, path: &'a DavPath, do_content: bool) -> FsFuture<'a, Vec<DavProp>> {
         async move {
-            let tree = &mut *self.tree.lock().unwrap();
+            let tree = &mut *self.0.lock().unwrap();
             let node_id = tree.lookup(path.as_bytes())?;
             let node = tree.get_node(node_id)?;
             let mut res = Vec::new();
@@ -300,9 +285,9 @@ impl DavFileSystem for MemFs {
         .boxed()
     }
 
-    fn get_prop<'a>(&'a self, path: &'a DavPath, prop: DavProp) -> FsFuture<Vec<u8>> {
+    fn get_prop<'a>(&'a self, path: &'a DavPath, prop: DavProp) -> FsFuture<'a, Vec<u8>> {
         async move {
-            let tree = &mut *self.tree.lock().unwrap();
+            let tree = &mut *self.0.lock().unwrap();
             let node_id = tree.lookup(path.as_bytes())?;
             let node = tree.get_node(node_id)?;
             let p = node

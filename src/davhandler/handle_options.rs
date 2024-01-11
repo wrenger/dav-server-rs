@@ -23,10 +23,10 @@ impl crate::DavHandler {
         // allowed. If the current method is not OPTIONS, leave
         // out the current method since we're probably called
         // for DavMethodNotAllowed.
-        let method = dav_method(req.method()).unwrap_or(DavMethod::Options);
-        let islock = |m| m == DavMethod::Lock || m == DavMethod::Unlock;
+        let method = dav_method(req.method()).unwrap_or(DavMethod::OPTIONS);
+        let islock = |m| m == DavMethod::LOCK || m == DavMethod::UNLOCK;
         let mm = |v: &mut Vec<String>, m: &str, y: DavMethod| {
-            if (y == DavMethod::Options || (y != method || islock(y) != islock(method)))
+            if (y == DavMethod::OPTIONS || (y != method || islock(y) != islock(method)))
                 && (!islock(y) || self.ls.is_some())
                 && self.allow.contains(y)
             {
@@ -38,30 +38,30 @@ impl crate::DavHandler {
         let meta = self.fs.metadata(&path).await;
         let is_unmapped = meta.is_err();
         let is_file = meta.map(|m| m.is_file()).unwrap_or_default();
-        let is_star = path.is_star() && method == DavMethod::Options;
+        let is_star = path.is_star() && method == DavMethod::OPTIONS;
 
         let mut v = Vec::new();
         if is_unmapped && !is_star {
-            mm(&mut v, "OPTIONS", DavMethod::Options);
-            mm(&mut v, "MKCOL", DavMethod::MkCol);
-            mm(&mut v, "PUT", DavMethod::Put);
-            mm(&mut v, "LOCK", DavMethod::Lock);
+            mm(&mut v, "OPTIONS", DavMethod::OPTIONS);
+            mm(&mut v, "MKCOL", DavMethod::MKCOL);
+            mm(&mut v, "PUT", DavMethod::PUT);
+            mm(&mut v, "LOCK", DavMethod::LOCK);
         } else {
             if is_file || is_star {
-                mm(&mut v, "HEAD", DavMethod::Head);
-                mm(&mut v, "GET", DavMethod::Get);
-                mm(&mut v, "PATCH", DavMethod::Patch);
-                mm(&mut v, "PUT", DavMethod::Put);
+                mm(&mut v, "HEAD", DavMethod::HEAD);
+                mm(&mut v, "GET", DavMethod::GET);
+                mm(&mut v, "PATCH", DavMethod::PATCH);
+                mm(&mut v, "PUT", DavMethod::PUT);
             }
-            mm(&mut v, "OPTIONS", DavMethod::Options);
-            mm(&mut v, "PROPFIND", DavMethod::PropFind);
-            mm(&mut v, "COPY", DavMethod::Copy);
+            mm(&mut v, "OPTIONS", DavMethod::OPTIONS);
+            mm(&mut v, "PROPFIND", DavMethod::PROPFIND);
+            mm(&mut v, "COPY", DavMethod::COPY);
             if path.as_url_string() != "/" {
-                mm(&mut v, "MOVE", DavMethod::Move);
-                mm(&mut v, "DELETE", DavMethod::Delete);
+                mm(&mut v, "MOVE", DavMethod::MOVE);
+                mm(&mut v, "DELETE", DavMethod::DELETE);
             }
-            mm(&mut v, "LOCK", DavMethod::Lock);
-            mm(&mut v, "UNLOCK", DavMethod::Unlock);
+            mm(&mut v, "LOCK", DavMethod::LOCK);
+            mm(&mut v, "UNLOCK", DavMethod::UNLOCK);
         }
 
         let a = v.join(",").parse().unwrap();

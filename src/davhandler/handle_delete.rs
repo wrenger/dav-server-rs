@@ -136,7 +136,7 @@ impl crate::DavHandler {
         // just a simple status.
         if let Some(ref locksystem) = self.ls {
             let t = tokens.iter().map(|s| s.as_str()).collect::<Vec<&str>>();
-            let principal = self.principal.as_deref().map(|s| s.as_str());
+            let principal = &self.principal;
             if let Err(_l) = locksystem.check(&path, principal, false, true, t) {
                 return Err(DavError::Status(StatusCode::LOCKED));
             }

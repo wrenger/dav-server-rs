@@ -143,8 +143,8 @@ pub(crate) async fn dav_if_match(
                     if !valid || s.starts_with("DAV:") {
                         false
                     } else {
-                        match ls {
-                            Some(ls) => ls.check(p, None, true, false, vec![s]).is_ok(),
+                        match &ls {
+                            Some(ls) => ls.check(p, "", true, false, vec![s]).is_ok(),
                             None => false,
                         }
                     }

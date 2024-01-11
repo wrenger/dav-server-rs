@@ -60,18 +60,18 @@ pub fn dav_handler(handler: DavHandler) -> BoxedFilter<(impl Reply,)> {
 /// base path joined with the remainder of the request path,
 /// like `warp::filters::fs::dir`.
 ///
-/// The behaviour for serving a directory depends on the flags:
+/// The behavior for serving a directory depends on the flags:
 ///
 /// - `index_html`: if an `index.html` file is found, serve it.
 /// - `auto_index_over_get`: Create a directory index page when accessing over HTTP `GET` (but NOT
 ///   affecting WebDAV `PROPFIND` method currently). In the current implementation, this only
 ///   affects HTTP `GET` method (commonly used for listing the directories when accessing through a
 ///   `http://` or `https://` URL for a directory in a browser), but NOT WebDAV listing of a
-///   directory (HTTP `PROPFIND`). BEWARE: The name and behaviour of this parameter variable may
+///   directory (HTTP `PROPFIND`). BEWARE: The name and behavior of this parameter variable may
 ///   change, and later it may control WebDAV `PROPFIND`, too (but not as of now).
 ///
 ///   In release mode, if `auto_index_over_get` is `true`, then this executes as described above
-///   (currently affecting only HTTP `GET`), but beware of this current behaviour.
+///   (currently affecting only HTTP `GET`), but beware of this current behavior.
 ///
 ///   In debug mode, if `auto_index_over_get` is `false`, this _panics_. That is so that it alerts
 ///   the developers to this current limitation, so they don't accidentally expect

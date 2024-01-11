@@ -23,7 +23,7 @@ pub struct DavLock {
     /// Path/
     pub path: DavPath,
     /// Principal.
-    pub principal: Option<String>,
+    pub principal: String,
     /// Owner.
     pub owner: Option<Element>,
     /// When the lock turns stale (absolute).
@@ -43,7 +43,7 @@ pub trait DavLockSystem: Debug + Sync + Send {
     fn lock(
         &self,
         path: &DavPath,
-        principal: Option<&str>,
+        principal: &str,
         owner: Option<&Element>,
         timeout: Option<Duration>,
         shared: bool,
@@ -67,7 +67,7 @@ pub trait DavLockSystem: Debug + Sync + Send {
     fn check(
         &self,
         path: &DavPath,
-        principal: Option<&str>,
+        principal: &str,
         ignore_principal: bool,
         deep: bool,
         submitted_tokens: Vec<&str>,

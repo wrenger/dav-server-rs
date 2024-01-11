@@ -136,4 +136,4 @@ use crate::errors::{DavError, DavResult};
 use crate::fs::*;
 
 pub use crate::davhandler::{DavBuilder, DavHandler, FileSystem, LockSystem};
-pub use crate::util::{DavMethod, DavMethodSet};
+pub use crate::util::DavMethod;

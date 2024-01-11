@@ -1,6 +1,7 @@
 use std::io::{Cursor, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use bitflags::bitflags;
 use bytes::Bytes;
 use headers::Header;
 use http::method::InvalidMethod;
@@ -11,42 +12,52 @@ use crate::body::Body;
 use crate::errors::DavError;
 use crate::DavResult;
 
-/// HTTP Methods supported by DavHandler.
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
-#[repr(u32)]
-pub enum DavMethod {
-    Head = 0x0001,
-    Get = 0x0002,
-    Put = 0x0004,
-    Patch = 0x0008,
-    Options = 0x0010,
-    PropFind = 0x0020,
-    PropPatch = 0x0040,
-    MkCol = 0x0080,
-    Copy = 0x0100,
-    Move = 0x0200,
-    Delete = 0x0400,
-    Lock = 0x0800,
-    Unlock = 0x1000,
+bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct DavMethod: u32 {
+        const HEAD = 0x0001;
+        const GET = 0x0002;
+        const PUT = 0x0004;
+        const PATCH = 0x0008;
+        const OPTIONS = 0x0010;
+        const PROPFIND = 0x0020;
+        const PROPPATCH = 0x0040;
+        const MKCOL = 0x0080;
+        const COPY = 0x0100;
+        const MOVE = 0x0200;
+        const DELETE = 0x0400;
+        const LOCK = 0x0800;
+        const UNLOCK = 0x1000;
+
+        const HTTP_RO = Self::HEAD.bits() | Self::GET.bits() | Self::OPTIONS.bits();
+        const HTTP_RW = Self::HTTP_RO.bits() | Self::PUT.bits();
+        const WEBDAV_RO = Self::HTTP_RO.bits() | Self::PROPFIND.bits();
+        const WEBDAV_BODY = Self::PUT.bits() | Self::PATCH.bits()
+            | Self::PROPFIND.bits() | Self::PROPPATCH.bits() | Self::LOCK.bits();
+        // const WEBDAV_RW = Self::all().bits();
+    }
+}
+impl DavMethod {
+    pub const WEBDAV_RW: Self = Self::all();
 }
 
 // translate method into our own enum that has webdav methods as well.
-pub(crate) fn dav_method(m: &http::Method) -> DavResult<DavMethod> {
+pub fn dav_method(m: &http::Method) -> DavResult<DavMethod> {
     let m = match *m {
-        http::Method::HEAD => DavMethod::Head,
-        http::Method::GET => DavMethod::Get,
-        http::Method::PUT => DavMethod::Put,
-        http::Method::PATCH => DavMethod::Patch,
-        http::Method::DELETE => DavMethod::Delete,
-        http::Method::OPTIONS => DavMethod::Options,
+        http::Method::HEAD => DavMethod::HEAD,
+        http::Method::GET => DavMethod::GET,
+        http::Method::PUT => DavMethod::PUT,
+        http::Method::PATCH => DavMethod::PATCH,
+        http::Method::DELETE => DavMethod::DELETE,
+        http::Method::OPTIONS => DavMethod::OPTIONS,
         _ => match m.as_str() {
-            "PROPFIND" => DavMethod::PropFind,
-            "PROPPATCH" => DavMethod::PropPatch,
-            "MKCOL" => DavMethod::MkCol,
-            "COPY" => DavMethod::Copy,
-            "MOVE" => DavMethod::Move,
-            "LOCK" => DavMethod::Lock,
-            "UNLOCK" => DavMethod::Unlock,
+            "PROPFIND" => DavMethod::PROPFIND,
+            "PROPPATCH" => DavMethod::PROPPATCH,
+            "MKCOL" => DavMethod::MKCOL,
+            "COPY" => DavMethod::COPY,
+            "MOVE" => DavMethod::MOVE,
+            "LOCK" => DavMethod::LOCK,
+            "UNLOCK" => DavMethod::UNLOCK,
             _ => {
                 return Err(DavError::UnknownDavMethod);
             }
@@ -67,91 +78,17 @@ impl std::convert::TryFrom<&http::Method> for DavMethod {
     }
 }
 
-/// A set of allowed [`DavMethod`]s.
-///
-/// [`DavMethod`]: enum.DavMethod.html
-#[derive(Clone, Copy, Debug)]
-pub struct DavMethodSet(u32);
-
-impl DavMethodSet {
-    pub const HTTP_RO: DavMethodSet =
-        DavMethodSet(DavMethod::Get as u32 | DavMethod::Head as u32 | DavMethod::Options as u32);
-    pub const HTTP_RW: DavMethodSet = DavMethodSet(Self::HTTP_RO.0 | DavMethod::Put as u32);
-    pub const WEBDAV_RO: DavMethodSet = DavMethodSet(Self::HTTP_RO.0 | DavMethod::PropFind as u32);
-    pub const WEBDAV_RW: DavMethodSet = DavMethodSet(0xffffffff);
-
-    /// New set, all methods allowed.
-    pub fn all() -> DavMethodSet {
-        DavMethodSet(0xffffffff)
-    }
-
-    /// New empty set.
-    pub fn none() -> DavMethodSet {
-        DavMethodSet(0)
-    }
-
-    /// Add a method.
-    pub fn add(&mut self, m: DavMethod) -> &Self {
-        self.0 |= m as u32;
-        self
-    }
-
-    /// Remove a method.
-    pub fn remove(&mut self, m: DavMethod) -> &Self {
-        self.0 &= !(m as u32);
-        self
-    }
-
-    /// Check if a method is in the set.
-    pub fn contains(&self, m: DavMethod) -> bool {
-        self.0 & (m as u32) > 0
-    }
-
-    /// Generate an DavMethodSet from a list of words.
-    pub fn from_vec(v: Vec<impl AsRef<str>>) -> Result<DavMethodSet, InvalidMethod> {
-        let mut m: u32 = 0;
-        for w in &v {
-            m |= match w.as_ref().to_lowercase().as_str() {
-                "head" => DavMethod::Head as u32,
-                "get" => DavMethod::Get as u32,
-                "put" => DavMethod::Put as u32,
-                "patch" => DavMethod::Patch as u32,
-                "delete" => DavMethod::Delete as u32,
-                "options" => DavMethod::Options as u32,
-                "propfind" => DavMethod::PropFind as u32,
-                "proppatch" => DavMethod::PropPatch as u32,
-                "mkcol" => DavMethod::MkCol as u32,
-                "copy" => DavMethod::Copy as u32,
-                "move" => DavMethod::Move as u32,
-                "lock" => DavMethod::Lock as u32,
-                "unlock" => DavMethod::Unlock as u32,
-                "http-ro" => Self::HTTP_RO.0,
-                "http-rw" => Self::HTTP_RW.0,
-                "webdav-ro" => Self::WEBDAV_RO.0,
-                "webdav-rw" => Self::WEBDAV_RW.0,
-                _ => {
-                    // A trick to get at the value of http::method::InvalidMethod.
-                    let invalid_method = http::method::Method::from_bytes(b"").unwrap_err();
-                    return Err(invalid_method);
-                }
-            };
-        }
-        Ok(DavMethodSet(m))
-    }
-}
-
-pub(crate) fn dav_xml_error(body: &str) -> Body {
+pub fn dav_xml_error(body: &str) -> Body {
     let xml = format!(
-        "{}\n{}\n{}\n{}\n",
-        r#"<?xml version="1.0" encoding="utf-8" ?>"#,
-        r#"<D:error xmlns:D="DAV:">"#,
-        body,
-        r#"</D:error>"#
+        "<?xml version=\"1.0\" encoding=\"utf-8\" ?>\n\
+        <D:error xmlns:D=\"DAV:\">\n\
+        {body}\n\
+        </D:error>\n"
     );
     Body::from(xml)
 }
 
-pub(crate) fn systemtime_to_offsetdatetime(t: SystemTime) -> time::OffsetDateTime {
+pub fn systemtime_to_offsetdatetime(t: SystemTime) -> time::OffsetDateTime {
     match t.duration_since(UNIX_EPOCH) {
         Ok(t) => {
             let tm = time::OffsetDateTime::from_unix_timestamp(t.as_secs() as i64).unwrap();
@@ -161,21 +98,21 @@ pub(crate) fn systemtime_to_offsetdatetime(t: SystemTime) -> time::OffsetDateTim
     }
 }
 
-pub(crate) fn systemtime_to_httpdate(t: SystemTime) -> String {
+pub fn systemtime_to_httpdate(t: SystemTime) -> String {
     let d = headers::Date::from(t);
     let mut v = Vec::new();
     d.encode(&mut v);
     v[0].to_str().unwrap().to_owned()
 }
 
-pub(crate) fn systemtime_to_rfc3339(t: SystemTime) -> String {
+pub fn systemtime_to_rfc3339(t: SystemTime) -> String {
     // 1996-12-19T16:39:57Z
     systemtime_to_offsetdatetime(t).format(&Rfc3339).unwrap()
 }
 
 // A buffer that implements "Write".
 #[derive(Clone)]
-pub(crate) struct MemBuffer(Cursor<Vec<u8>>);
+pub struct MemBuffer(Cursor<Vec<u8>>);
 
 impl MemBuffer {
     pub fn new() -> MemBuffer {

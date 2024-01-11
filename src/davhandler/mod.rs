@@ -18,7 +18,7 @@ use crate::davheaders;
 use crate::davpath::DavPath;
 use crate::ls::fakels::FakeLs;
 use crate::ls::memls::MemLs;
-use crate::util::{dav_method, DavMethod, DavMethodSet};
+use crate::util::{dav_method, DavMethod};
 
 use crate::errors::DavError;
 use crate::fs::*;
@@ -35,6 +35,8 @@ pub mod handle_options;
 pub mod handle_props;
 pub mod handle_put;
 
+const MAX_BODY_SIZE: usize = 65536;
+
 /// Configuration of the handler.
 #[derive(Clone)]
 pub struct DavBuilder {
@@ -45,10 +47,10 @@ pub struct DavBuilder {
     /// Locksystem backend.
     ls: Option<LockSystem>,
     /// Set of allowed methods (Defaults to "all methods")
-    allow: DavMethodSet,
+    allow: DavMethod,
     /// Principal is webdav speak for "user", used to give locks an owner (if a locksystem is
     /// active).
-    principal: Option<String>,
+    principal: String,
     /// Hide symbolic links? Defaults to `true`.
     hide_symlinks: bool,
     /// Does GET on a directory return indexes.
@@ -145,8 +147,8 @@ impl DavBuilder {
             prefix: String::new(),
             fs,
             ls: None,
-            allow: DavMethodSet::all(),
-            principal: None,
+            allow: DavMethod::all(),
+            principal: String::new(),
             hide_symlinks: true,
             autoindex: None,
             read_buf_size: READ_BUF_SIZE,
@@ -175,7 +177,7 @@ impl DavBuilder {
     }
 
     /// Which methods to allow (default is all methods).
-    pub fn methods(self, allow: DavMethodSet) -> Self {
+    pub fn methods(self, allow: DavMethod) -> Self {
         let mut this = self;
         this.allow = allow;
         this
@@ -184,7 +186,7 @@ impl DavBuilder {
     /// Set the name of the "webdav principal". This will be the owner of any created locks.
     pub fn principal(self, principal: impl Into<String>) -> Self {
         let mut this = self;
-        this.principal = Some(principal.into());
+        this.principal = principal.into();
         this
     }
 
@@ -223,15 +225,15 @@ impl DavBuilder {
 /// The `handle` and `handle_with` methods are the methods that do the actual work.
 #[derive(Clone)]
 pub struct DavHandler {
-    pub(crate) prefix: Arc<String>,
-    pub(crate) fs: Arc<dyn DavFileSystem>,
-    pub(crate) ls: Option<Arc<dyn DavLockSystem>>,
-    pub(crate) allow: DavMethodSet,
-    pub(crate) principal: Option<Arc<String>>,
-    pub(crate) hide_symlinks: bool,
-    pub(crate) autoindex: Option<bool>,
-    pub(crate) read_buf_size: usize,
-    pub(crate) redirect: bool,
+    pub prefix: Arc<String>,
+    pub fs: Arc<dyn DavFileSystem>,
+    pub ls: Option<Arc<dyn DavLockSystem>>,
+    pub allow: DavMethod,
+    pub principal: Arc<String>,
+    pub hide_symlinks: bool,
+    pub autoindex: Option<bool>,
+    pub read_buf_size: usize,
+    pub redirect: bool,
 }
 
 impl From<DavBuilder> for DavHandler {
@@ -241,7 +243,7 @@ impl From<DavBuilder> for DavHandler {
             fs: cfg.fs.build(),
             ls: cfg.ls.map(|ls| ls.build()),
             allow: cfg.allow,
-            principal: cfg.principal.map(Arc::new),
+            principal: Arc::new(cfg.principal),
             hide_symlinks: cfg.hide_symlinks,
             autoindex: cfg.autoindex,
             read_buf_size: cfg.read_buf_size,
@@ -254,16 +256,6 @@ impl DavHandler {
     /// Return a configuration builder.
     pub fn builder(fs: FileSystem) -> DavBuilder {
         DavBuilder::new(fs)
-    }
-
-    /// Handle a webdav request.
-    pub async fn handle<ReqBody, ReqData, ReqError>(&self, req: Request<ReqBody>) -> Response<Body>
-    where
-        ReqData: Buf + Send + 'static,
-        ReqError: StdError + Send + Sync + 'static,
-        ReqBody: HttpBody<Data = ReqData, Error = ReqError>,
-    {
-        self.handle_inner(req).await
     }
 
     /// Handle a webdav request, overriding parts of the config.
@@ -293,9 +285,9 @@ impl DavHandler {
             ));
         }
         if let Some(principal) = principal {
-            this.principal = Some(Arc::new(principal));
+            this.principal = Arc::new(principal);
         }
-        this.handle_inner(req).await
+        this.handle(req).await
     }
 
     /// Handles a request with a `Stream` body instead of a `HttpBody`.
@@ -315,7 +307,7 @@ impl DavHandler {
             let (parts, body) = req.into_parts();
             Request::from_parts(parts, StreamBody::new(body))
         };
-        self.handle_inner(req).await
+        self.handle(req).await
     }
 
     /// Handles a request with a `Stream` body instead of a `HttpBody`.
@@ -340,15 +332,15 @@ impl DavHandler {
             this.prefix = Arc::new(prefix);
         }
         if let Some(principal) = principal {
-            this.principal = Some(Arc::new(principal));
+            this.principal = Arc::new(principal);
         }
-        this.handle_inner(req).await
+        this.handle(req).await
     }
 }
 
 impl DavHandler {
     // helper.
-    pub(crate) async fn has_parent<'a>(&'a self, path: &'a DavPath) -> bool {
+    async fn has_parent<'a>(&'a self, path: &'a DavPath) -> bool {
         let p = path.parent();
         self.fs
             .metadata(&p)
@@ -358,14 +350,14 @@ impl DavHandler {
     }
 
     // helper.
-    pub(crate) fn path(&self, req: &Request<()>) -> DavPath {
+    fn path(&self, req: &Request<()>) -> DavPath {
         // This never fails (has been checked before)
         DavPath::from_uri_and_prefix(req.uri(), &self.prefix).unwrap()
     }
 
     // See if this is a directory and if so, if we have
     // to fixup the path by adding a slash at the end.
-    pub(crate) fn fixpath(
+    fn fixpath(
         &self,
         res: &mut Response<Body>,
         path: &mut DavPath,
@@ -380,44 +372,8 @@ impl DavHandler {
         meta
     }
 
-    // drain request body and return length.
-    pub(crate) async fn read_request<ReqBody, ReqData, ReqError>(
-        &self,
-        body: ReqBody,
-        max_size: usize,
-    ) -> DavResult<Vec<u8>>
-    where
-        ReqBody: HttpBody<Data = ReqData, Error = ReqError>,
-        ReqData: Buf + Send + 'static,
-        ReqError: StdError + Send + Sync + 'static,
-    {
-        let mut data = Vec::new();
-        pin_utils::pin_mut!(body);
-        while let Some(res) = body.data().await {
-            let mut buf = res.map_err(|_| {
-                DavError::IoError(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "UnexpectedEof",
-                ))
-            })?;
-            while buf.has_remaining() {
-                if data.len() + buf.remaining() > max_size {
-                    return Err(StatusCode::PAYLOAD_TOO_LARGE.into());
-                }
-                let b = buf.chunk();
-                let l = b.len();
-                data.extend_from_slice(b);
-                buf.advance(l);
-            }
-        }
-        Ok(data)
-    }
-
     // internal dispatcher.
-    async fn handle_inner<ReqBody, ReqData, ReqError>(
-        &self,
-        req: Request<ReqBody>,
-    ) -> Response<Body>
+    pub async fn handle<ReqBody, ReqData, ReqError>(&self, req: Request<ReqBody>) -> Response<Body>
     where
         ReqBody: HttpBody<Data = ReqData, Error = ReqError>,
         ReqData: Buf + Send + 'static,
@@ -487,61 +443,69 @@ impl DavHandler {
         }
 
         // translate HTTP method to Webdav method.
-        let method = match dav_method(req.method()) {
-            Ok(m) => m,
-            Err(e) => {
-                debug!("refusing method {} request {}", req.method(), req.uri());
-                return Err(e);
-            }
-        };
+        let method = dav_method(req.method())?;
 
         // see if method is allowed.
         if !self.allow.contains(method) {
-            debug!(
-                "method {} not allowed on request {}",
-                req.method(),
-                req.uri()
-            );
+            debug!("method {} not allowed: {}", req.method(), req.uri());
             return Err(DavError::StatusClose(StatusCode::METHOD_NOT_ALLOWED));
         }
 
         // make sure the request path is valid.
         let path = DavPath::from_uri_and_prefix(req.uri(), &self.prefix)?;
 
-        // PUT is the only handler that reads the body itself. All the
-        // other handlers either expected no body, or a pre-read Vec<u8>.
-        let (body_strm, body_data) = match method {
-            DavMethod::Put | DavMethod::Patch => (Some(body), Vec::new()),
-            _ => (None, self.read_request(body, 65536).await?),
-        };
-
-        // Not all methods accept a body.
-        match method {
-            DavMethod::Put
-            | DavMethod::Patch
-            | DavMethod::PropFind
-            | DavMethod::PropPatch
-            | DavMethod::Lock => {}
-            _ => {
-                if !body_data.is_empty() {
-                    return Err(StatusCode::UNSUPPORTED_MEDIA_TYPE.into());
-                }
-            }
-        }
-
         debug!("== START REQUEST {:?} {}", method, path);
 
         match method {
-            DavMethod::Options => self.handle_options(&req).await,
-            DavMethod::PropFind => self.handle_propfind(&req, &body_data).await,
-            DavMethod::PropPatch => self.handle_proppatch(&req, &body_data).await,
-            DavMethod::MkCol => self.handle_mkcol(&req).await,
-            DavMethod::Delete => self.handle_delete(&req).await,
-            DavMethod::Lock => self.handle_lock(&req, &body_data).await,
-            DavMethod::Unlock => self.handle_unlock(&req).await,
-            DavMethod::Head | DavMethod::Get => self.handle_get(&req).await,
-            DavMethod::Copy | DavMethod::Move => self.handle_copymove(&req, method).await,
-            DavMethod::Put | DavMethod::Patch => self.handle_put(&req, body_strm.unwrap()).await,
+            // Streaming the body
+            DavMethod::PUT | DavMethod::PATCH => self.handle_put(&req, body).await,
+            method => {
+                // Load the entire body into memory.
+                let body = load_body(body).await?;
+                // Not all methods accept a body.
+                if !DavMethod::WEBDAV_BODY.contains(method) && !body.is_empty() {
+                    debug!("method {method:?} does not accept a body");
+                    return Err(StatusCode::UNSUPPORTED_MEDIA_TYPE.into());
+                }
+
+                match method {
+                    DavMethod::OPTIONS => self.handle_options(&req).await,
+                    DavMethod::PROPFIND => self.handle_propfind(&req, &body).await,
+                    DavMethod::PROPPATCH => self.handle_proppatch(&req, &body).await,
+                    DavMethod::MKCOL => self.handle_mkcol(&req).await,
+                    DavMethod::DELETE => self.handle_delete(&req).await,
+                    DavMethod::LOCK => self.handle_lock(&req, &body).await,
+                    DavMethod::UNLOCK => self.handle_unlock(&req).await,
+                    DavMethod::HEAD | DavMethod::GET => self.handle_get(&req).await,
+                    DavMethod::COPY | DavMethod::MOVE => self.handle_copymove(&req, method).await,
+                    _ => panic!("unhandled method {method:?}"),
+                }
+            }
         }
     }
+}
+
+// drain request body and return length.
+async fn load_body<ReqBody, ReqData, ReqError>(body: ReqBody) -> DavResult<Vec<u8>>
+where
+    ReqBody: HttpBody<Data = ReqData, Error = ReqError>,
+    ReqData: Buf,
+    ReqError: StdError,
+{
+    let mut data = Vec::new();
+    pin_utils::pin_mut!(body);
+    while let Some(res) = body.data().await {
+        let mut buf =
+            res.map_err(|_| io::Error::new(io::ErrorKind::UnexpectedEof, "UnexpectedEof"))?;
+        while buf.has_remaining() {
+            if data.len() + buf.remaining() > MAX_BODY_SIZE {
+                return Err(StatusCode::PAYLOAD_TOO_LARGE.into());
+            }
+            let b = buf.chunk();
+            let l = b.len();
+            data.extend_from_slice(b);
+            buf.advance(l);
+        }
+    }
+    Ok(data)
 }

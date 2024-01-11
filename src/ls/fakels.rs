@@ -49,7 +49,7 @@ impl DavLockSystem for FakeLs {
     fn lock(
         &self,
         path: &DavPath,
-        principal: Option<&str>,
+        principal: &str,
         owner: Option<&Element>,
         timeout: Option<Duration>,
         shared: bool,
@@ -65,7 +65,7 @@ impl DavLockSystem for FakeLs {
         let lock = DavLock {
             token,
             path: path.clone(),
-            principal: principal.map(|s| s.to_string()),
+            principal: principal.to_string(),
             owner: owner.cloned(),
             timeout_at: Some(timeout_at),
             timeout: Some(timeout),
@@ -97,7 +97,7 @@ impl DavLockSystem for FakeLs {
         let lock = DavLock {
             token: token.to_string(),
             path: path.clone(),
-            principal: None,
+            principal: String::new(),
             owner: None,
             timeout_at: Some(timeout_at),
             timeout: Some(timeout),
@@ -110,7 +110,7 @@ impl DavLockSystem for FakeLs {
     fn check(
         &self,
         _path: &DavPath,
-        _principal: Option<&str>,
+        _principal: &str,
         _ignore_principal: bool,
         _deep: bool,
         _submitted_tokens: Vec<&str>,

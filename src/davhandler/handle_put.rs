@@ -10,7 +10,7 @@ use http_body::Body as HttpBody;
 
 use crate::body::Body;
 use crate::conditional::if_match_get_tokens;
-use crate::davheaders;
+use crate::davheaders::{self, XUpdateRange};
 use crate::fs::*;
 use crate::{DavError, DavResult};
 
@@ -63,15 +63,12 @@ impl crate::DavHandler {
         ReqData: Buf + Send + 'static,
         ReqError: StdError + Send + Sync + 'static,
     {
-        let mut start = 0;
-        let mut count = 0;
-        let mut have_count = false;
-        let mut do_range = false;
-
         let mut oo = OpenOptions::write();
         oo.create = true;
         oo.truncate = true;
 
+        let mut count = 0;
+        let mut have_count = false;
         if let Some(n) = req.headers().typed_get::<headers::ContentLength>() {
             count = n.0;
             have_count = true;
@@ -88,11 +85,10 @@ impl crate::DavHandler {
                 oo.size = Some(count);
             }
         }
-        let checksum = req
+        oo.checksum = req
             .headers()
             .get("OC-Checksum")
             .and_then(|v| v.to_str().ok().map(|s| s.to_string()));
-        oo.checksum = checksum;
 
         let path = self.path(req);
         let meta = self.fs.metadata(&path).await;
@@ -101,6 +97,8 @@ impl crate::DavHandler {
         let mut res = Response::new(Body::empty());
         res.headers_mut().typed_insert(headers::Connection::close());
 
+        let mut start = 0;
+        let mut do_range = false;
         // SabreDAV style PATCH?
         if req.method() == http::Method::PATCH {
             if !req
@@ -115,19 +113,19 @@ impl crate::DavHandler {
             };
             let r = req
                 .headers()
-                .typed_get::<davheaders::XUpdateRange>()
+                .typed_get::<XUpdateRange>()
                 .ok_or(DavError::StatusClose(SC::BAD_REQUEST))?;
             match r {
-                davheaders::XUpdateRange::FromTo(b, e) => {
+                XUpdateRange::FromTo(b, e) => {
                     if b > e || e - b + 1 != count {
                         return Err(DavError::StatusClose(SC::RANGE_NOT_SATISFIABLE));
                     }
                     start = b;
                 }
-                davheaders::XUpdateRange::AllFrom(b) => {
+                XUpdateRange::AllFrom(b) => {
                     start = b;
                 }
-                davheaders::XUpdateRange::Last(n) => {
+                XUpdateRange::Last(n) => {
                     if let Ok(ref m) = meta {
                         if n > m.len() {
                             return Err(DavError::StatusClose(SC::RANGE_NOT_SATISFIABLE));
@@ -135,7 +133,7 @@ impl crate::DavHandler {
                         start = m.len() - n;
                     }
                 }
-                davheaders::XUpdateRange::Append => {
+                XUpdateRange::Append => {
                     oo.append = true;
                 }
             }
@@ -144,28 +142,28 @@ impl crate::DavHandler {
         }
 
         // Apache-style Content-Range header?
-        match req.headers().typed_try_get::<headers::ContentRange>() {
-            Ok(Some(range)) => {
-                if let Some((b, e)) = range.bytes_range() {
-                    if b > e {
+        if let Some(range) = req
+            .headers()
+            .typed_try_get::<headers::ContentRange>()
+            .map_err(|_| DavError::StatusClose(SC::BAD_REQUEST))?
+        {
+            if let Some((b, e)) = range.bytes_range() {
+                if b > e {
+                    return Err(DavError::StatusClose(SC::RANGE_NOT_SATISFIABLE));
+                }
+
+                if have_count {
+                    if e - b + 1 != count {
                         return Err(DavError::StatusClose(SC::RANGE_NOT_SATISFIABLE));
                     }
-
-                    if have_count {
-                        if e - b + 1 != count {
-                            return Err(DavError::StatusClose(SC::RANGE_NOT_SATISFIABLE));
-                        }
-                    } else {
-                        count = e - b + 1;
-                        have_count = true;
-                    }
-                    start = b;
-                    do_range = true;
-                    oo.truncate = false;
+                } else {
+                    count = e - b + 1;
+                    have_count = true;
                 }
+                start = b;
+                do_range = true;
+                oo.truncate = false;
             }
-            Ok(None) => {}
-            Err(_) => return Err(DavError::StatusClose(SC::BAD_REQUEST)),
         }
 
         // check the If and If-* headers.
@@ -184,7 +182,7 @@ impl crate::DavHandler {
         // if locked check if we hold that lock.
         if let Some(ref locksystem) = self.ls {
             let t = tokens.iter().map(|s| s.as_str()).collect::<Vec<&str>>();
-            let principal = self.principal.as_deref().map(|s| s.as_str());
+            let principal = &self.principal;
             if let Err(_l) = locksystem.check(&path, principal, false, false, t) {
                 return Err(DavError::StatusClose(SC::LOCKED));
             }

@@ -158,8 +158,12 @@ mod test {
         use std::env::current_dir;
         use std::process::Command;
 
+        env_logger::init();
+
+        std::fs::create_dir_all("tmp").unwrap();
+
         let server = tokio::spawn(async move {
-            super::serve(None, true, false, false, true, 4918)
+            super::serve(Some("tmp".into()), true, false, false, true, 4918)
                 .await
                 .unwrap();
         });

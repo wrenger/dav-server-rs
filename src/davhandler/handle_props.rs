@@ -395,7 +395,7 @@ impl DavHandler {
         // if locked check if we hold that lock.
         if let Some(ref locksystem) = self.ls {
             let t = tokens.iter().map(|s| s.as_str()).collect::<Vec<&str>>();
-            let principal = self.principal.as_deref().map(|s| s.as_str());
+            let principal = &self.principal;
             if let Err(_l) = locksystem.check(&path, principal, false, false, t) {
                 return Err(StatusCode::LOCKED.into());
             }
@@ -472,7 +472,14 @@ impl DavHandler {
         }
 
         // And reply.
-        let mut pw = PropWriter::new(req, &mut res, "propertyupdate", Vec::new(), self.fs.clone(), None)?;
+        let mut pw = PropWriter::new(
+            req,
+            &mut res,
+            "propertyupdate",
+            Vec::new(),
+            self.fs.clone(),
+            None,
+        )?;
         *res.body_mut() = Body::from(AsyncStream::new(|tx| async move {
             pw.set_tx(tx);
             pw.write_propresponse(&path, hm)?;
@@ -863,7 +870,9 @@ impl PropWriter {
         self.q_cache = qc;
 
         // and list the dead properties as well.
-        if (self.name == "propname" || self.name == "allprop") && self.fs.have_props(path).await {
+        if (self.name == "propname" || self.name == "allprop")
+            && self.fs.have_props(path).await
+        {
             if let Ok(v) = self.fs.get_props(path, do_content).await {
                 v.into_iter()
                     .map(davprop_to_element)

@@ -52,7 +52,7 @@ impl crate::DavHandler {
                 return match self.fs.copy(source, dest).await {
                     Ok(_) => Ok(()),
                     Err(e) => {
-                        debug!("do_copy: self.fs.copy error: {:?}", e);
+                        debug!("do_copy: copy error: {:?}", e);
                         add_status(multierror, source, e).await
                     }
                 };
@@ -63,7 +63,7 @@ impl crate::DavHandler {
             // we do not do yet).
             if let Err(e) = self.fs.create_dir(dest).await {
                 if depth != Depth::Zero || e != FsError::Exists {
-                    debug!("do_copy: self.fs.create_dir({}) error: {:?}", dest, e);
+                    debug!("do_copy: create_dir({}) error: {:?}", dest, e);
                     return add_status(multierror, dest, e).await;
                 }
             }
@@ -76,7 +76,7 @@ impl crate::DavHandler {
             let mut entries = match self.fs.read_dir(source, ReadDirMeta::DataSymlink).await {
                 Ok(entries) => entries,
                 Err(e) => {
-                    debug!("do_copy: self.fs.read_dir error: {:?}", e);
+                    debug!("do_copy: read_dir error: {:?}", e);
                     return add_status(multierror, source, e).await;
                 }
             };
@@ -152,7 +152,7 @@ impl crate::DavHandler {
             .map_or(true, |o| o.0);
         let depth = match req.headers().typed_get::<Depth>() {
             Some(Depth::Infinity) | None => Depth::Infinity,
-            Some(Depth::Zero) if method == DavMethod::Copy => Depth::Zero,
+            Some(Depth::Zero) if method == DavMethod::COPY => Depth::Zero,
             _ => return Err(StatusCode::BAD_REQUEST.into()),
         };
 
@@ -165,7 +165,7 @@ impl crate::DavHandler {
         // for MOVE, tread with care- if the path ends in "/" but it actually
         // is a symlink, we want to move the symlink, not what it points to.
         let mut path = self.path(req);
-        let meta = if method == DavMethod::Move {
+        let meta = if method == DavMethod::MOVE {
             let meta = self.fs.symlink_metadata(&path).await?;
             if meta.is_symlink() {
                 let m2 = self.fs.metadata(&path).await?;
@@ -230,8 +230,8 @@ impl crate::DavHandler {
         // just a simple status.
         if let Some(ref locksystem) = self.ls {
             let t = tokens.iter().map(|s| s.as_str()).collect::<Vec<&str>>();
-            let principal = self.principal.as_deref().map(|s| s.as_str());
-            if method == DavMethod::Move {
+            let principal = &self.principal;
+            if method == DavMethod::MOVE {
                 // for MOVE check if source path is locked
                 if let Err(_l) = locksystem.check(&path, principal, false, true, t.clone()) {
                     return Err(StatusCode::LOCKED.into());
@@ -267,7 +267,7 @@ impl crate::DavHandler {
                 }
 
                 // COPY or MOVE.
-                if method == DavMethod::Copy {
+                if method == DavMethod::COPY {
                     if this
                         .do_copy(&path, &dest, &dest, depth, &mut multierror)
                         .await

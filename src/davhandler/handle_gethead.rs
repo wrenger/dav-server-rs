@@ -275,7 +275,7 @@ impl crate::DavHandler {
         let path = self.path(req);
 
         // Is PROPFIND explicitly allowed?
-        let allow_propfind = self.allow.contains(DavMethod::PropFind);
+        let allow_propfind = self.allow.contains(DavMethod::PROPFIND);
 
         // Only allow index generation if explicitly set to true, _or_ if it was
         // unset, and PROPFIND is explicitly allowed.

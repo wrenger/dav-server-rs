@@ -88,7 +88,7 @@ impl DUCache {
     // does _not_ exist, return `true`.
     //
     // Note that it's assumed the file_name() DOES start with "._".
-    fn negative(&self, path: &PathBuf) -> bool {
+    fn negative(&self, path: &Path) -> bool {
         // parent directory must be present in the cache.
         let mut dir = match path.parent() {
             Some(d) => d.to_path_buf(),
@@ -137,7 +137,7 @@ impl DUCache {
 
 // Storage for the entries of one dir while we're collecting them.
 #[derive(Default)]
-pub(crate) struct DUCacheBuilder {
+pub struct DUCacheBuilder {
     dir: PathBuf,
     entries: Vec<OsString>,
     done: bool,
@@ -244,8 +244,8 @@ impl DavMetaData for EmptyMetaData {
 impl LocalFs {
     // Is this a virtualfile ?
     #[inline]
-    pub(crate) fn is_virtual(&self, path: &DavPath) -> Option<Box<dyn DavMetaData>> {
-        if !self.inner.macos {
+    pub fn is_virtual(&self, path: &DavPath) -> Option<Box<dyn DavMetaData>> {
+        if !self.macos {
             return None;
         }
         match path.as_bytes() {
@@ -258,8 +258,8 @@ impl LocalFs {
 
     // This file can never exist.
     #[inline]
-    pub(crate) fn is_forbidden(&self, path: &DavPath) -> bool {
-        if !self.inner.macos {
+    pub fn is_forbidden(&self, path: &DavPath) -> bool {
+        if !self.macos {
             return false;
         }
         match path.as_bytes() {
@@ -271,8 +271,8 @@ impl LocalFs {
     // File might not exists because of negative cache entry.
     #[cfg(unix)]
     #[inline]
-    pub(crate) fn is_notfound(&self, path: &PathBuf) -> bool {
-        if !self.inner.macos {
+    pub fn is_notfound(&self, path: &Path) -> bool {
+        if !self.macos {
             return false;
         }
         match path.file_name().map(|p| p.as_bytes()) {
@@ -285,8 +285,8 @@ impl LocalFs {
     // File might not exists because of negative cache entry.
     #[cfg(windows)]
     #[inline]
-    pub(crate) fn is_notfound(&self, path: &PathBuf) -> bool {
-        if !self.inner.macos {
+    pub fn is_notfound(&self, path: &Path) -> bool {
+        if !self.macos {
             return false;
         }
         match path.file_name().map(|p| p.to_str().unwrap().as_bytes()) {
@@ -298,8 +298,8 @@ impl LocalFs {
 
     // Return a "directory cache builder".
     #[inline]
-    pub(crate) fn dir_cache_builder(&self, path: PathBuf) -> Option<DUCacheBuilder> {
-        if self.inner.macos {
+    pub fn dir_cache_builder(&self, path: PathBuf) -> Option<DUCacheBuilder> {
+        if self.macos {
             Some(DUCacheBuilder::start(path))
         } else {
             None

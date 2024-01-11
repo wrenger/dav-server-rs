@@ -37,11 +37,11 @@ impl Stream for Body {
     type Item = io::Result<Bytes>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-        match self.inner {
-            BodyType::Bytes(ref mut strm) => Poll::Ready(strm.take().map(Ok)),
-            BodyType::AsyncStream(ref mut strm) => {
-                let strm = Pin::new(strm);
-                strm.poll_next(cx)
+        match &mut self.inner {
+            BodyType::Bytes(bytes) => Poll::Ready(bytes.take().map(Ok)),
+            BodyType::AsyncStream(stream) => {
+                let stream = Pin::new(stream);
+                stream.poll_next(cx)
             }
             BodyType::Empty => Poll::Ready(None),
         }

@@ -13,29 +13,35 @@ impl crate::DavHandler {
         let meta = self.fs.metadata(&path).await;
 
         // check the If and If-* headers.
-        let res = if_match_get_tokens(req, meta.ok().as_deref(), &*self.fs, self.ls.as_deref(), &path).await;
+        let res = if_match_get_tokens(
+            req,
+            meta.ok().as_deref(),
+            &*self.fs,
+            self.ls.as_deref(),
+            &path,
+        )
+        .await;
         let tokens = match res {
             Ok(t) => t,
             Err(s) => return Err(DavError::Status(s)),
         };
 
         // if locked check if we hold that lock.
-        if let Some(ref locksystem) = self.ls {
+        if let Some(locksystem) = &self.ls {
             let t = tokens.iter().map(|s| s.as_str()).collect::<Vec<&str>>();
-            let principal = self.principal.as_deref().map(|s| s.as_str());
-            if let Err(_l) = locksystem.check(&path, principal, false, false, t) {
+            let principal = &self.principal;
+            if locksystem.check(&path, principal, false, false, t).is_err() {
                 return Err(DavError::Status(StatusCode::LOCKED));
             }
         }
 
-        let mut res = Response::new(Body::empty());
-
         match self.fs.create_dir(&path).await {
             // RFC 4918 9.3.1 MKCOL Status Codes.
-            Err(FsError::Exists) => return Err(DavError::Status(StatusCode::METHOD_NOT_ALLOWED)),
-            Err(FsError::NotFound) => return Err(DavError::Status(StatusCode::CONFLICT)),
-            Err(e) => return Err(DavError::FsError(e)),
+            Err(FsError::Exists) => Err(DavError::Status(StatusCode::METHOD_NOT_ALLOWED)),
+            Err(FsError::NotFound) => Err(DavError::Status(StatusCode::CONFLICT)),
+            Err(e) => Err(DavError::FsError(e)),
             Ok(()) => {
+                let mut res = Response::new(Body::empty());
                 if path.is_collection() {
                     path.add_slash();
                     res.headers_mut().typed_insert(davheaders::ContentLocation(
@@ -43,9 +49,8 @@ impl crate::DavHandler {
                     ));
                 }
                 *res.status_mut() = StatusCode::CREATED;
+                Ok(res)
             }
         }
-
-        Ok(res)
     }
 }
